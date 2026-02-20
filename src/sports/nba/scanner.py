@@ -142,6 +142,80 @@ def get_betting_indicator(proj, line):
     else:        return f"🔴 UNDER ({diff:.2f})"
 
 
+def calculate_hit_rates(df_history, player_id, stat, line):
+    """
+    Calculate L5, L10, L20 hit rates against a specific line for a player.
+    Returns: (l5_rate, l10_rate, l20_rate) as floats between 0.0 and 1.0.
+    """
+    if line is None or line <= 0:
+        return 0.0, 0.0, 0.0
+        
+    # Get player's history sorted by date
+    player_logs = df_history[df_history['PLAYER_ID'] == player_id].sort_values('GAME_DATE')
+    
+    # We might not have the raw stat name if it's a combo stat (like PRA)
+    # Ensure combo stats are calculated if missing
+    if stat not in player_logs.columns:
+        if stat == 'PRA' and all(c in player_logs.columns for c in ['PTS', 'REB', 'AST']):
+            player_logs['PRA'] = player_logs['PTS'] + player_logs['REB'] + player_logs['AST']
+        elif stat == 'PR' and all(c in player_logs.columns for c in ['PTS', 'REB']):
+            player_logs['PR'] = player_logs['PTS'] + player_logs['REB']
+        elif stat == 'PA' and all(c in player_logs.columns for c in ['PTS', 'AST']):
+            player_logs['PA'] = player_logs['PTS'] + player_logs['AST']
+        elif stat == 'RA' and all(c in player_logs.columns for c in ['REB', 'AST']):
+            player_logs['RA'] = player_logs['REB'] + player_logs['AST']
+        elif stat == 'SB' and all(c in player_logs.columns for c in ['STL', 'BLK']):
+            player_logs['SB'] = player_logs['STL'] + player_logs['BLK']
+        else:
+            return 0.0, 0.0, 0.0
+            
+    recent_20 = player_logs.tail(20)
+    if recent_20.empty:
+        return 0.0, 0.0, 0.0
+        
+    # How many times did they hit OVER the line?
+    hits_20 = (recent_20[stat] > line).sum()
+    hits_10 = (recent_20.tail(10)[stat] > line).sum()
+    hits_5  = (recent_20.tail(5)[stat] > line).sum()
+    
+    count_20 = len(recent_20)
+    count_10 = len(recent_20.tail(10))
+    count_5  = len(recent_20.tail(5))
+    
+    l20_rate = hits_20 / count_20 if count_20 > 0 else 0.0
+    l10_rate = hits_10 / count_10 if count_10 > 0 else 0.0
+    l5_rate  = hits_5 / count_5 if count_5 > 0 else 0.0
+    
+    return l5_rate, l10_rate, l20_rate
+
+
+def calculate_confidence_score(edge_pct, l10_hit, opponent_win_pct=None):
+    """
+    Generate an Elite Confidence Score (0-100).
+    Components:
+    - 40%: Model Edge %
+    - 40%: L10 Hit Rate
+    - 20%: Matchup Quality
+    """
+    # Max out edge score at 15% Edge (scales 0-40)
+    edge_cap = min(abs(edge_pct), 15.0)
+    edge_score = (edge_cap / 15.0) * 40.0
+    
+    # Hit rate score (Hit rate for overs, miss rate for unders => handled before passing)
+    hit_score = l10_hit * 40.0
+    
+    # Matchup Score (Simple version based on Opponent strength)
+    matchup_score = 10.0 # Base average
+    if opponent_win_pct is not None:
+        # If playing bad team (low win pct), good for overs.
+        # Very simplified representation of matchup quality:
+        if opponent_win_pct < 0.40: matchup_score = 20.0
+        elif opponent_win_pct > 0.60: matchup_score = 5.0
+        
+    total_score = edge_score + hit_score + matchup_score
+    return min(total_score, 100.0)
+
+
 def load_data():
     if not os.path.exists(DATA_FILE): return None
     df = pd.read_csv(DATA_FILE)
@@ -592,14 +666,32 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 pp_val   = round(line, 2) if line else 0
                 edge_val = round(proj - line, 2) if line else 0
 
+                # Calculate Hit Rates
+                l5_hit, l10_hit, l20_hit = calculate_hit_rates(df_history, pid, target, line)
+
                 all_projections.append({
                     'REC': rec,
                     'NAME': player_name,
                     'TARGET': target,
                     'AI': round(proj, 2),
                     'PP': pp_val,
-                    'EDGE': edge_val
+                    'EDGE': edge_val,
+                    'L5_HIT': l5_hit,
+                    'L10_HIT': l10_hit,
+                    'L20_HIT': l20_hit
                 })
+
+                # Calculate Confidence Score
+                line_diff_for_hit = l10_hit if edge_val > 0 else (1 - l10_hit)
+                
+                # Fetch opponent context for Matchup Score if available in valid_input
+                opp_win_pct = None
+                if 'OPP_WIN_PCT' in valid_input.columns:
+                    opp_win_pct = valid_input['OPP_WIN_PCT'].iloc[0]
+
+                # We can't divide by zero if line is 0, safely handled above. Calculate proper percent.
+                pct_edge_safe = (edge_val / line) * 100 if line else 0
+                conf_score = calculate_confidence_score(pct_edge_safe, line_diff_for_hit, opp_win_pct)
 
                 if line is not None and line > 0:
                     edge = proj - line
@@ -616,7 +708,11 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                         'EDGE': edge,
                         'PCT_EDGE': pct_edge,
                         'TIER': tier_info.get('emoji', '~') + ' ' + tier_info.get('tier', 'UNKNOWN'),
-                        'THRESHOLD': tier_info.get('threshold', 2.5)
+                        'THRESHOLD': tier_info.get('threshold', 2.5),
+                        'L5_HIT': l5_hit,
+                        'L10_HIT': l10_hit,
+                        'L20_HIT': l20_hit,
+                        'CONFIDENCE': conf_score
                     })
 
     # Display results
@@ -634,7 +730,7 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
         
         print(f"   Removed {len(best_bets) - len(deduped_bets)} duplicate entries")
         
-        # Sort by tier and edge
+        # Sort by tier, hit rate, and edge
         tier_order = {'ELITE': 0, 'STRONG': 1, 'DECENT': 2, 'RISKY': 3, 'AVOID': 4}
         # Extract tier name for sorting (TIER is "⭐ ELITE", we need "ELITE")
         def _tier_key(b):
@@ -642,7 +738,13 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 if name in b.get('TIER', ''):
                     return tier_order[name]
             return 99
-        deduped_bets.sort(key=lambda x: (_tier_key(x), -abs(x['PCT_EDGE'])))
+            
+        def _sort_key(b):
+            # Prioritize Tier, then L10 Hit Rate (for Over) or Miss Rate (for Under), then Edge
+            hit_rate_score = b['L10_HIT'] if b['EDGE'] > 0 else (1.0 - b['L10_HIT'])
+            return (_tier_key(b), -hit_rate_score, -abs(b['PCT_EDGE']))
+            
+        deduped_bets.sort(key=_sort_key)
         
         # Take top 20 with market diversity — ensure every stat type is covered
         def _diverse_top(bets, n=20):
@@ -661,29 +763,47 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 if key not in seen and len(result) < n:
                     result.append(b)
                     seen.add(key)
-            result.sort(key=lambda x: (_tier_key(x), -abs(x['PCT_EDGE'])))
+            result.sort(key=_sort_key)
             return result[:n]
 
-        top_overs  = _diverse_top([b for b in deduped_bets if b['EDGE'] > 0])
-        top_unders = _diverse_top([b for b in deduped_bets if b['EDGE'] < 0])
+        top_overs  = _diverse_top([b for b in deduped_bets if b['EDGE'] > 0], n=30)
+        top_unders = _diverse_top([b for b in deduped_bets if b['EDGE'] < 0], n=30)
+        
+        # Pull strict elite plays.
+        elite_overs = [b for b in top_overs if b['CONFIDENCE'] >= 75.0]
+        elite_unders = [b for b in top_unders if b['CONFIDENCE'] >= 75.0]
 
         # Table format — consistent column widths, spacing, separator
-        sep = "-" * 73
-        print("\n  TOP 10 OVERS (Highest Value)")
+        sep = "-" * 98
+        
+        if elite_overs or elite_unders:
+            print("\n  💎 ELITE CONFIDENCE PLAYS (Score >= 75) 💎")
+            print()
+            print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<10} | {'AI vs PP':<15} | {'EDGE %':<8} | {'L10 HIT':<7} | {'CONF':<5}")
+            print(sep)
+            for bet in elite_overs + elite_unders:
+                l10_pct = f"{bet['L10_HIT']*100:.0f}%"
+                print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<10} | "
+                      f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}% | {l10_pct:>6} | {bet['CONFIDENCE']:.1f}")
+        
+        
+        print("\n  TOP 15 OVERS (Highest Value & Hit Rate)")
         print()
-        print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<5} | {'AI vs PP':<15} | {'EDGE %':<8}")
+        print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<10} | {'AI vs PP':<15} | {'EDGE %':<8} | {'L10 HIT':<7} | {'CONF':<5}")
         print(sep)
-        for bet in top_overs:
-            print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<5} | "
-                  f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}%")
+        for bet in top_overs[:15]:
+            l10_pct = f"{bet['L10_HIT']*100:.0f}%"
+            print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<10} | "
+                  f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}% | {l10_pct:>6} | {bet['CONFIDENCE']:.1f}")
 
-        print("\n  TOP 10 UNDERS (Lowest Value)")
+        print("\n  TOP 15 UNDERS (Lowest Value & Miss Rate)")
         print()
-        print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<5} | {'AI vs PP':<15} | {'EDGE %':<8}")
+        print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<10} | {'AI vs PP':<15} | {'EDGE %':<8} | {'L10 HIT':<7} | {'CONF':<5}")
         print(sep)
-        for bet in top_unders:
-            print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<5} | "
-                  f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}%")
+        for bet in top_unders[:15]:
+            l10_pct = f"{bet['L10_HIT']*100:.0f}%"
+            print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<10} | "
+                  f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}% | {l10_pct:>6} | {bet['CONFIDENCE']:.1f}")
 
         # Determine save filename based on actual date used
         if actual_date:

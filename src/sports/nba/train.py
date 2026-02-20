@@ -28,7 +28,10 @@ MODEL_DIR   = os.path.join(BASE_DIR, 'models', 'nba')
 TARGETS = [
     'PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'BLK', 'STL', 'TOV',
     'PRA', 'PR', 'PA', 'RA', 'SB',
-    'FGM', 'FGA', 'FTM', 'FTA'
+    'FGM', 'FGA', 'FTM', 'FTA', 'NBA_FANTASY_PTS',
+    'PTS_1H', 'REB_1H', 'AST_1H', 'FG3M_1H', 'FG3A_1H', 'BLK_1H', 'STL_1H', 'TOV_1H',
+    'PRA_1H', 'PR_1H', 'PA_1H', 'RA_1H', 'SB_1H',
+    'FGM_1H', 'FGA_1H', 'FTM_1H', 'FTA_1H', 'NBA_FANTASY_PTS_1H'
 ]
 
 FEATURES = [
@@ -53,11 +56,19 @@ FEATURES = [
     'PACE_ROLLING',
     'USAGE_VACUUM', 'STAR_COUNT',
     # NEW FEATURES
+    'NBA_FANTASY_PTS_L5', 'NBA_FANTASY_PTS_L10', 'NBA_FANTASY_PTS_L20', 'NBA_FANTASY_PTS_Season', 'NBA_FANTASY_PTS_L5_Median', 'NBA_FANTASY_PTS_L10_Median',
     'PTS_LOC_MEAN', 'REB_LOC_MEAN', 'AST_LOC_MEAN', 'FG3M_LOC_MEAN', 'PRA_LOC_MEAN',
     'OPP_WIN_PCT', 'IS_VS_ELITE_TEAM'
 ]
 
-for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
+# Add 1H specific features
+for stat in ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL', 'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA', 'MIN', 'NBA_FANTASY_PTS']:
+    FEATURES.extend([
+        f'{stat}_1H_L5', f'{stat}_1H_L10', f'{stat}_1H_L20', f'{stat}_1H_Season',
+        f'{stat}_1H_L5_Median', f'{stat}_1H_L10_Median'
+    ])
+
+for combo in ['PRA', 'PR', 'PA', 'RA', 'SB', 'PRA_1H', 'PR_1H', 'PA_1H', 'RA_1H', 'SB_1H']:
     FEATURES.extend([f'{combo}_L5', f'{combo}_L10', f'{combo}_L20', f'{combo}_Season', f'{combo}_L5_Median', f'{combo}_L10_Median'])
 
 for stat in ['PTS', 'REB', 'AST', 'FG3M', 'FGA', 'BLK', 'STL', 'TOV', 'FGM', 'FTM', 'FTA']:
@@ -76,6 +87,12 @@ def ensure_combo_stats(df):
     if 'PA'  not in df.columns: df['PA']  = df['PTS'] + df['AST']
     if 'RA'  not in df.columns: df['RA']  = df['REB'] + df['AST']
     if 'SB'  not in df.columns: df['SB']  = df['STL'] + df['BLK']
+    
+    if 'PRA_1H' not in df.columns and 'PTS_1H' in df.columns: df['PRA_1H'] = df['PTS_1H'] + df['REB_1H'] + df['AST_1H']
+    if 'PR_1H'  not in df.columns and 'PTS_1H' in df.columns: df['PR_1H']  = df['PTS_1H'] + df['REB_1H']
+    if 'PA_1H'  not in df.columns and 'PTS_1H' in df.columns: df['PA_1H']  = df['PTS_1H'] + df['AST_1H']
+    if 'RA_1H'  not in df.columns and 'REB_1H' in df.columns: df['RA_1H']  = df['REB_1H'] + df['AST_1H']
+    if 'SB_1H'  not in df.columns and 'STL_1H' in df.columns: df['SB_1H']  = df['STL_1H'] + df['BLK_1H']
     return df
 
 

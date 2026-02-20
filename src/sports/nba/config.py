@@ -61,42 +61,62 @@ STAT_MAP = {
     'Pts+Rebs': 'PR',
     'Pts+Asts': 'PA',
     'Rebs+Asts': 'RA',
-    'Blks+Stls': 'SB'
+    'Blks+Stls': 'SB',
+    'Fantasy Score': 'NBA_FANTASY_PTS',
+    # 1st Half (1H) Markets
+    '1H Pts+Rebs+Asts': 'PRA_1H',
+    '1H Pts+Rebs': 'PR_1H',
+    '1H Pts+Asts': 'PA_1H',
+    '1H Rebs+Asts': 'RA_1H',
+    '1H Blks+Stls': 'SB_1H',
+    '1H Points': 'PTS_1H',
+    '1H Rebounds': 'REB_1H',
+    '1H Assists': 'AST_1H',
+    '1H 3-PT Made': 'FG3M_1H',
+    '1H 3-PT Attempted': 'FG3A_1H',
+    '1H Blocked Shots': 'BLK_1H',
+    '1H Steals': 'STL_1H',
+    '1H Turnovers': 'TOV_1H',
+    '1H FG Made': 'FGM_1H',
+    '1H FG Attempted': 'FGA_1H',
+    '1H Free Throws Made': 'FTM_1H',
+    '1H Free Throws Attempted': 'FTA_1H',
+    '1H Fantasy Score': 'NBA_FANTASY_PTS_1H'
 }
 
 # 4. Model Quality Tiers (Based on Actual Directional Accuracy)
 # Updated: 2026-02-13
 MODEL_TIERS = {
     'ELITE': {
-        'models': ['PTS', 'FGM', 'PA', 'PR', 'PRA'],
+        'models': ['PTS', 'FGM', 'PA', 'PR', 'PRA', 'NBA_FANTASY_PTS', 'PTS_1H', 'PRA_1H', 'PR_1H', 'PA_1H', 'FGA_1H'],
         'accuracy_range': '85-90%',
         'edge_threshold': 1.5,
         'description': '⭐ Highest confidence - bet heavily',
         'emoji': '⭐'
     },
     'STRONG': {
-        'models': ['FG3A', 'FGA'],
+        'models': ['FG3A', 'FGA', 'PRA_1H', 'NBA_FANTASY_PTS_1H', 'AST_1H'],
         'accuracy_range': '80-85%',
         'edge_threshold': 2.0,
         'description': '✔ Good confidence - bet selectively',
         'emoji': '✔'
     },
     'DECENT': {
-        'models': ['FG3M', 'FTA', 'RA', 'FTM', 'REB', 'AST'],
+        'models': ['FG3M', 'FTA', 'RA', 'FTM', 'REB', 'AST', 'REB_1H', 'FGM_1H'],
         'accuracy_range': '72-80%',
         'edge_threshold': 2.5,
         'description': '~ Moderate confidence - bet carefully',
         'emoji': '~'
     },
     'RISKY': {
-        'models': ['STL', 'TOV'],
+        'models': ['STL', 'TOV', 'RA_1H', 'FTA_1H'],
         'accuracy_range': '61-71%',
         'edge_threshold': 3.0,
         'description': '⚠️ High variance - bet only large edges',
         'emoji': '⚠️'
     },
     'AVOID': {
-        'models': ['BLK', 'SB'],
+        'models': ['BLK', 'SB', 'FTM_1H', 'BLK_1H', 'STL_1H', 'SB_1H', 'TOV_1H', 'FG3M_1H', 'FG3A_1H'],
         'accuracy_range': '35-53%',
         'edge_threshold': 10.0,
         'description': '❌ Too random - avoid unless huge edge',
