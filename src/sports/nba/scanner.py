@@ -189,7 +189,7 @@ def calculate_hit_rates(df_history, player_id, stat, line):
     return l5_rate, l10_rate, l20_rate
 
 
-def calculate_confidence_score(edge_pct, l10_hit, opponent_win_pct=None):
+def calculate_confidence_score(edge_pct, l10_hit, opponent_win_pct=None, is_role_expansion=False):
     """
     Generate an Elite Confidence Score (0-100).
     Components:
@@ -201,18 +201,23 @@ def calculate_confidence_score(edge_pct, l10_hit, opponent_win_pct=None):
     edge_cap = min(abs(edge_pct), 15.0)
     edge_score = (edge_cap / 15.0) * 40.0
     
-    # Hit rate score (Hit rate for overs, miss rate for unders => handled before passing)
+    # Hit rate score (Hit rate for overs, miss rate for unders)
     hit_score = l10_hit * 40.0
     
     # Matchup Score (Simple version based on Opponent strength)
     matchup_score = 10.0 # Base average
     if opponent_win_pct is not None:
-        # If playing bad team (low win pct), good for overs.
-        # Very simplified representation of matchup quality:
         if opponent_win_pct < 0.40: matchup_score = 20.0
         elif opponent_win_pct > 0.60: matchup_score = 5.0
         
     total_score = edge_score + hit_score + matchup_score
+    
+    # HUMAN HANDICAPPER OVERRIDE: 
+    # Do not bet UNDERS on bench players suddenly getting massive minutes or usage.
+    # The variance is too high, even if historical hit-rate is 0%.
+    if is_role_expansion and edge_pct < 0:
+        total_score *= 0.5  # Slash confidence by half for dangerous Unders
+        
     return min(total_score, 100.0)
 
 
@@ -684,6 +689,15 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 # Calculate Confidence Score
                 line_diff_for_hit = l10_hit if edge_val > 0 else (1 - l10_hit)
                 
+                # Detect Role Expansion (High variance traps for Unders)
+                is_role_expansion = False
+                min_l5 = last_row.get('MIN_L5', 0)
+                min_season = last_row.get('MIN_Season', 0)
+                
+                # If they are stepping into huge minutes relative to season avg, OR massive team injuries
+                if (min_season > 5 and min_l5 / min_season > 1.4) or missing_usage_today > 25.0:
+                    is_role_expansion = True
+                
                 # Fetch opponent context for Matchup Score if available in valid_input
                 opp_win_pct = None
                 if 'OPP_WIN_PCT' in valid_input.columns:
@@ -691,7 +705,7 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
 
                 # We can't divide by zero if line is 0, safely handled above. Calculate proper percent.
                 pct_edge_safe = (edge_val / line) * 100 if line else 0
-                conf_score = calculate_confidence_score(pct_edge_safe, line_diff_for_hit, opp_win_pct)
+                conf_score = calculate_confidence_score(pct_edge_safe, line_diff_for_hit, opp_win_pct, is_role_expansion)
 
                 if line is not None and line > 0:
                     edge = proj - line
