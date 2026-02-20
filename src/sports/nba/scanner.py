@@ -856,13 +856,27 @@ _STAT_SEASON_COLS = {
 }
 
 
+def _get_position_category(pos):
+    """Map raw NBA positions to Guard, Wing, Big for injury tracking."""
+    pos = str(pos).upper()
+    if 'C' in pos: return 'Big'
+    if 'F' in pos: return 'Wing'
+    return 'Guard'
+
+
 def _calculate_injury_adjustments_fast(latest_rows_map, team_players, active_pid):
     """
     Optimized version of injury adjustments using pre-computed cache.
+    Distributes 50% globally across usage, 50% positionally across usage.
     """
-    # --- Gather last-row data for every teammate ---
-    out_production = {}       # stat -> total missing production
-    active_usage   = {}       # pid  -> usage rate (for active players)
+    out_production_global = {}
+    out_production_pos = {'Guard': {}, 'Wing': {}, 'Big': {}}
+    
+    active_usage_global = {}
+    active_usage_pos = {'Guard': {}, 'Wing': {}, 'Big': {}}
+
+    active_last = latest_rows_map.get(active_pid, {})
+    active_cat = _get_position_category(active_last.get('POSITION', 'G'))
 
     for pid in team_players:
         last = latest_rows_map.get(pid)
@@ -870,31 +884,42 @@ def _calculate_injury_adjustments_fast(latest_rows_map, team_players, active_pid
         
         pname = last['PLAYER_NAME']
         usage = last.get('USAGE_RATE_Season', 0)
+        pos = last.get('POSITION', 'G')
+        cat = _get_position_category(pos)
 
         if get_player_status(pname) == 'OUT':
             # Accumulate missing production
             for stat, col in _STAT_SEASON_COLS.items():
                 val = last.get(col, 0)
-                # Check for nan/None
-                if val and val > 0:
-                     out_production[stat] = out_production.get(stat, 0) + val
+                if pd.notna(val) and val > 0:
+                     out_production_global[stat] = out_production_global.get(stat, 0) + val
+                     out_production_pos[cat][stat] = out_production_pos[cat].get(stat, 0) + val
         else:
             if usage > 0:
-                active_usage[pid] = usage
+                active_usage_global[pid] = usage
+                active_usage_pos[cat][pid] = usage
 
-    if not out_production or active_pid not in active_usage:
+    if not out_production_global or active_pid not in active_usage_global:
         return {}  # nothing to adjust
 
-    # --- Redistribute proportionally by usage share ---
-    total_active_usage = sum(active_usage.values())
-    if total_active_usage == 0: return {}
-    
-    player_share = active_usage[active_pid] / total_active_usage
+    # BLEND: 50% Positional, 50% Global
+    total_active_usage = sum(active_usage_global.values())
+    global_share = active_usage_global[active_pid] / total_active_usage if total_active_usage > 0 else 0
+
+    cat_usage = sum(active_usage_pos[active_cat].values())
+    pos_share = active_usage_pos[active_cat][active_pid] / cat_usage if cat_usage > 0 else 0
 
     adjustments = {}
-    for stat, missing_total in out_production.items():
+    for stat in _STAT_SEASON_COLS.keys():
         rate = ABSORPTION_RATES.get(stat, 0.40)
-        adj  = missing_total * player_share * rate
+        
+        missing_global = out_production_global.get(stat, 0) * 0.5
+        adj_global = missing_global * global_share * rate
+        
+        missing_pos = out_production_pos[active_cat].get(stat, 0) * 0.5
+        adj_pos = missing_pos * pos_share * rate
+
+        adj = adj_global + adj_pos
         if abs(adj) > 0.01:
             adjustments[stat] = round(adj, 2)
 
@@ -939,9 +964,18 @@ def _calculate_injury_adjustments(df_history, team_id, active_pid):
     team_df = df_history[(df_history[season_col] == current_season) & (df_history['TEAM_ID'] == team_id)]
     all_pids = team_df['PLAYER_ID'].unique()
 
+    # Get active player's category
+    active_cat = 'Guard'
+    active_rows = team_df[team_df['PLAYER_ID'] == active_pid].sort_values('GAME_DATE')
+    if not active_rows.empty:
+        active_cat = _get_position_category(active_rows.iloc[-1].get('POSITION', 'G'))
+
     # --- Gather last-row data for every teammate ---
-    out_production = {}       # stat -> total missing production
-    active_usage   = {}       # pid  -> usage rate (for active players)
+    out_production_global = {}
+    out_production_pos = {'Guard': {}, 'Wing': {}, 'Big': {}}
+    
+    active_usage_global = {}
+    active_usage_pos = {'Guard': {}, 'Wing': {}, 'Big': {}}
 
     for pid in all_pids:
         p_rows = team_df[team_df['PLAYER_ID'] == pid].sort_values('GAME_DATE')
@@ -950,28 +984,42 @@ def _calculate_injury_adjustments(df_history, team_id, active_pid):
         last = p_rows.iloc[-1]
         pname = last['PLAYER_NAME']
         usage = last.get('USAGE_RATE_Season', 0)
+        pos = last.get('POSITION', 'G')
+        cat = _get_position_category(pos)
 
         if get_player_status(pname) == 'OUT':
             # Accumulate missing production
             for stat, col in _STAT_SEASON_COLS.items():
                 val = last.get(col, 0)
                 if pd.notna(val) and val > 0:
-                    out_production[stat] = out_production.get(stat, 0) + val
+                    out_production_global[stat] = out_production_global.get(stat, 0) + val
+                    out_production_pos[cat][stat] = out_production_pos[cat].get(stat, 0) + val
         else:
             if usage > 0:
-                active_usage[pid] = usage
+                active_usage_global[pid] = usage
+                active_usage_pos[cat][pid] = usage
 
-    if not out_production or active_pid not in active_usage:
+    if not out_production_global or active_pid not in active_usage_global:
         return {}  # nothing to adjust
 
-    # --- Redistribute proportionally by usage share ---
-    total_active_usage = sum(active_usage.values())
-    player_share = active_usage[active_pid] / total_active_usage
+    # BLEND: 50% Positional, 50% Global
+    total_active_usage = sum(active_usage_global.values())
+    global_share = active_usage_global[active_pid] / total_active_usage if total_active_usage > 0 else 0
+
+    cat_usage = sum(active_usage_pos[active_cat].values())
+    pos_share = active_usage_pos[active_cat][active_pid] / cat_usage if cat_usage > 0 else 0
 
     adjustments = {}
-    for stat, missing_total in out_production.items():
+    for stat in _STAT_SEASON_COLS.keys():
         rate = ABSORPTION_RATES.get(stat, 0.40)
-        adj  = missing_total * player_share * rate
+        
+        missing_global = out_production_global.get(stat, 0) * 0.5
+        adj_global = missing_global * global_share * rate
+        
+        missing_pos = out_production_pos[active_cat].get(stat, 0) * 0.5
+        adj_pos = missing_pos * pos_share * rate
+
+        adj = adj_global + adj_pos
         if abs(adj) > 0.01:
             adjustments[stat] = round(adj, 2)
 
