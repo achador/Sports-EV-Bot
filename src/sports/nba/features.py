@@ -22,11 +22,13 @@ from datetime import datetime
 # Resolve project root: src/sports/nba/features.py -> src/sports/nba -> src/sports -> src -> root
 BASE_DIR    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 LOGS_FILE   = os.path.join(BASE_DIR, 'data', 'nba', 'raw', 'raw_game_logs.csv')
+RAW_1H_FILE = os.path.join(BASE_DIR, 'data', 'nba', 'raw', 'raw_game_logs_1h.csv')
 POS_FILE    = os.path.join(BASE_DIR, 'data', 'nba', 'processed', 'player_positions.csv')
 OUTPUT_FILE = os.path.join(BASE_DIR, 'data', 'nba', 'processed', 'training_dataset.csv')
 
 TARGET_STATS = ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL',
-                'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA']
+                'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA', 'FPTS',
+                'PTS_1H', 'FPTS_1H']
 
 
 def load_and_merge_data():
@@ -41,6 +43,32 @@ def load_and_merge_data():
     df = df.dropna(subset=['MATCHUP', 'GAME_DATE'])
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
     df = df.sort_values(by=['PLAYER_ID', 'GAME_DATE'], ascending=True)
+    # --- MERGE 1H STATS ---
+    if os.path.exists(RAW_1H_FILE):
+        df_1h = pd.read_csv(RAW_1H_FILE)
+        df_1h = df_1h.drop_duplicates(subset=['PLAYER_ID', 'GAME_ID'])
+        df = pd.merge(df, df_1h, on=['PLAYER_ID', 'GAME_ID'], how='left')
+        
+        # Fill NA values derived from 1H logs with 0s (for players who didn't play in 1H)
+        cols_1h = [c for c in df_1h.columns if c.endswith('_1H')]
+        df[cols_1h] = df[cols_1h].fillna(0)
+        
+        # Compose 1H Combo Stats
+        if 'PTS_1H' in df.columns and 'REB_1H' in df.columns and 'AST_1H' in df.columns:
+            df['PRA_1H'] = df['PTS_1H'] + df['REB_1H'] + df['AST_1H']
+            df['PR_1H']  = df['PTS_1H'] + df['REB_1H']
+            df['PA_1H']  = df['PTS_1H'] + df['AST_1H']
+            df['RA_1H']  = df['REB_1H'] + df['AST_1H']
+        if 'STL_1H' in df.columns and 'BLK_1H' in df.columns:
+            df['SB_1H']  = df['STL_1H'] + df['BLK_1H']
+    else:
+        print(f"Warning: {RAW_1H_FILE} not found. 1H features will not be built.")
+
+    # Calculate FPTS using exact PrizePicks scoring formula
+    df['FPTS'] = (df['PTS'] * 1) + (df['REB'] * 1.2) + (df['AST'] * 1.5) + (df['BLK'] * 3) + (df['STL'] * 3) - df['TOV']
+    if 'PTS_1H' in df.columns:
+        df['FPTS_1H'] = (df['PTS_1H'] * 1) + (df['REB_1H'] * 1.2) + (df['AST_1H'] * 1.5) + (df['BLK_1H'] * 3) + (df['STL_1H'] * 3) - df['TOV_1H']
+
     print(f"   Loaded {len(df):,} game logs for {df['PLAYER_ID'].nunique():,} players")
     return df
 
@@ -65,8 +93,12 @@ def add_rolling_features(df):
     df['CAREER_GAMES'] = df.groupby('PLAYER_ID').cumcount() + 1
     grouped = df.groupby('PLAYER_ID')
     base_stats = ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL', 'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA']
-    stats_to_roll = base_stats + ['MIN', 'GAME_SCORE', 'USAGE_RATE']
-    for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
+    stats_to_roll = base_stats + ['MIN', 'GAME_SCORE', 'USAGE_RATE', 'FPTS']
+    
+    # Add 1H equivalents (Only keeping highly liquid markets to reduce noise)
+    stats_to_roll.extend(['PTS_1H', 'MIN_1H', 'FPTS_1H'])
+    
+    for combo in ['PRA', 'PR', 'PA', 'RA', 'SB', 'PRA_1H', 'PR_1H', 'PA_1H', 'RA_1H', 'SB_1H']:
         if combo in df.columns:
             stats_to_roll.append(combo)
     rolling_data = {}

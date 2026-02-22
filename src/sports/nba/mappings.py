@@ -21,7 +21,7 @@ PP_NORMALIZATION_MAP = {
     'Free Throws Made': 'Free Throws Made',
     'Turnovers': 'Turnovers',
     'Steals': 'Steals',
-    'Fantasy Score': 'Fantasy',
+    'Fantasy Score': 'Fantasy Score',
     # Combo / efficiency markets
     'FG Made': 'Field Goals Made',
     'FG Attempted': 'Field Goals Attempted',
@@ -51,7 +51,12 @@ STAT_MAPPING = {
     'Free Throws Made': 'FTM',
     'Field Goals Made': 'FGM',
     'Free Throws Attempted': 'FTA',
-    'Field Goals Attempted': 'FGA'
+    'Field Goals Attempted': 'FGA',
+    'Fantasy Score': 'FPTS',
+    # 1H variants
+    '1H Points': 'PTS_1H',
+    '1H Pts+Rebs+Asts': 'PRA_1H',
+    '1H Fantasy Score': 'FPTS_1H'
 }
 
 # Stat reliability weight for combined scoring.

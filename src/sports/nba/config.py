@@ -61,21 +61,26 @@ STAT_MAP = {
     'Pts+Rebs': 'PR',
     'Pts+Asts': 'PA',
     'Rebs+Asts': 'RA',
-    'Blks+Stls': 'SB'
+    'Blks+Stls': 'SB',
+    'Fantasy Score': 'FPTS',
+    # 1st Half (1H) Markets
+    '1H Pts+Rebs+Asts': 'PRA_1H',
+    '1H Points': 'PTS_1H',
+    '1H Fantasy Score': 'FPTS_1H'
 }
 
 # 4. Model Quality Tiers (Based on Actual Directional Accuracy)
 # Updated: 2026-02-13
 MODEL_TIERS = {
     'ELITE': {
-        'models': ['PTS', 'FGM', 'PA', 'PR', 'PRA'],
+        'models': ['PTS', 'FGM', 'PA', 'PR', 'PRA', 'FPTS', 'PTS_1H', 'PRA_1H'],
         'accuracy_range': '85-90%',
         'edge_threshold': 1.5,
         'description': '⭐ Highest confidence - bet heavily',
         'emoji': '⭐'
     },
     'STRONG': {
-        'models': ['FG3A', 'FGA'],
+        'models': ['FG3A', 'FGA', 'FPTS_1H'],
         'accuracy_range': '80-85%',
         'edge_threshold': 2.0,
         'description': '✔ Good confidence - bet selectively',

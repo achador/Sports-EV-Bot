@@ -142,6 +142,85 @@ def get_betting_indicator(proj, line):
     else:        return f"🔴 UNDER ({diff:.2f})"
 
 
+def calculate_hit_rates(df_history, player_id, stat, line):
+    """
+    Calculate L5, L10, L20 hit rates against a specific line for a player.
+    Returns: (l5_rate, l10_rate, l20_rate) as floats between 0.0 and 1.0.
+    """
+    if line is None or line <= 0:
+        return 0.0, 0.0, 0.0
+        
+    # Get player's history sorted by date
+    player_logs = df_history[df_history['PLAYER_ID'] == player_id].sort_values('GAME_DATE')
+    
+    # We might not have the raw stat name if it's a combo stat (like PRA)
+    # Ensure combo stats are calculated if missing
+    if stat not in player_logs.columns:
+        if stat == 'PRA' and all(c in player_logs.columns for c in ['PTS', 'REB', 'AST']):
+            player_logs['PRA'] = player_logs['PTS'] + player_logs['REB'] + player_logs['AST']
+        elif stat == 'PR' and all(c in player_logs.columns for c in ['PTS', 'REB']):
+            player_logs['PR'] = player_logs['PTS'] + player_logs['REB']
+        elif stat == 'PA' and all(c in player_logs.columns for c in ['PTS', 'AST']):
+            player_logs['PA'] = player_logs['PTS'] + player_logs['AST']
+        elif stat == 'RA' and all(c in player_logs.columns for c in ['REB', 'AST']):
+            player_logs['RA'] = player_logs['REB'] + player_logs['AST']
+        elif stat == 'SB' and all(c in player_logs.columns for c in ['STL', 'BLK']):
+            player_logs['SB'] = player_logs['STL'] + player_logs['BLK']
+        else:
+            return 0.0, 0.0, 0.0
+            
+    recent_20 = player_logs.tail(20)
+    if recent_20.empty:
+        return 0.0, 0.0, 0.0
+        
+    # How many times did they hit OVER the line?
+    hits_20 = (recent_20[stat] > line).sum()
+    hits_10 = (recent_20.tail(10)[stat] > line).sum()
+    hits_5  = (recent_20.tail(5)[stat] > line).sum()
+    
+    count_20 = len(recent_20)
+    count_10 = len(recent_20.tail(10))
+    count_5  = len(recent_20.tail(5))
+    
+    l20_rate = hits_20 / count_20 if count_20 > 0 else 0.0
+    l10_rate = hits_10 / count_10 if count_10 > 0 else 0.0
+    l5_rate  = hits_5 / count_5 if count_5 > 0 else 0.0
+    
+    return l5_rate, l10_rate, l20_rate
+
+
+def calculate_confidence_score(edge_pct, l10_hit, opponent_win_pct=None, is_role_expansion=False):
+    """
+    Generate an Elite Confidence Score (0-100).
+    Components:
+    - 60%: Model Edge %
+    - 20%: L10 Hit Rate
+    - 20%: Matchup Quality
+    """
+    # Max out edge score at 15% Edge (scales 0-60)
+    edge_cap = min(abs(edge_pct), 15.0)
+    edge_score = (edge_cap / 15.0) * 60.0
+    
+    # Hit rate score (Hit rate for overs, miss rate for unders)
+    hit_score = l10_hit * 20.0
+    
+    # Matchup Score (Simple version based on Opponent strength)
+    matchup_score = 10.0 # Base average
+    if opponent_win_pct is not None:
+        if opponent_win_pct < 0.40: matchup_score = 20.0
+        elif opponent_win_pct > 0.60: matchup_score = 5.0
+        
+    total_score = edge_score + hit_score + matchup_score
+    
+    # HUMAN HANDICAPPER OVERRIDE: 
+    # Do not bet UNDERS on bench players suddenly getting massive minutes or usage.
+    # The variance is too high, even if historical hit-rate is 0%.
+    if is_role_expansion and edge_pct < 0:
+        total_score *= 0.5  # Slash confidence by half for dangerous Unders
+        
+    return min(total_score, 100.0)
+
+
 def load_data():
     if not os.path.exists(DATA_FILE): return None
     df = pd.read_csv(DATA_FILE)
@@ -592,18 +671,49 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 pp_val   = round(line, 2) if line else 0
                 edge_val = round(proj - line, 2) if line else 0
 
+                # Calculate Hit Rates
+                l5_hit, l10_hit, l20_hit = calculate_hit_rates(df_history, pid, target, line)
+
                 all_projections.append({
                     'REC': rec,
                     'NAME': player_name,
                     'TARGET': target,
                     'AI': round(proj, 2),
                     'PP': pp_val,
-                    'EDGE': edge_val
+                    'EDGE': edge_val,
+                    'L5_HIT': l5_hit,
+                    'L10_HIT': l10_hit,
+                    'L20_HIT': l20_hit
                 })
+
+                # Calculate Confidence Score
+                line_diff_for_hit = l10_hit if edge_val > 0 else (1 - l10_hit)
+                
+                # Detect Role Expansion (High variance traps for Unders)
+                is_role_expansion = False
+                min_l5 = last_row.get('MIN_L5', 0)
+                min_season = last_row.get('MIN_Season', 0)
+                
+                # If they are stepping into huge minutes relative to season avg, OR massive team injuries
+                if (min_season > 5 and min_l5 / min_season > 1.4) or missing_usage_today > 25.0:
+                    is_role_expansion = True
+                
+                # Fetch opponent context for Matchup Score if available in valid_input
+                opp_win_pct = None
+                if 'OPP_WIN_PCT' in valid_input.columns:
+                    opp_win_pct = valid_input['OPP_WIN_PCT'].iloc[0]
+
+                # Low-Line Mathematical Variance Fix:
+                # Dividing by 0.5 can inflate a 0.38 block edge into a 76% edge.
+                # We enforce a baseline statistical denominator of 2.0.
+                safe_denominator = max(line, 2.0) if line else 2.0
+                
+                pct_edge_safe = (edge_val / safe_denominator) * 100
+                conf_score = calculate_confidence_score(pct_edge_safe, line_diff_for_hit, opp_win_pct, is_role_expansion)
 
                 if line is not None and line > 0:
                     edge = proj - line
-                    pct_edge = (edge / line) * 100
+                    pct_edge = (edge / safe_denominator) * 100
 
                     tier_info = MODEL_QUALITY.get(target, {})
 
@@ -615,8 +725,12 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                         'PP': round(line, 2),
                         'EDGE': edge,
                         'PCT_EDGE': pct_edge,
-                        'TIER': tier_info.get('emoji', '~') + ' ' + tier_info.get('tier', 'UNKNOWN'),
-                        'THRESHOLD': tier_info.get('threshold', 2.5)
+                        'TIER': tier_info.get('tier', 'UNKNOWN'),
+                        'THRESHOLD': tier_info.get('threshold', 2.5),
+                        'L5_HIT': l5_hit,
+                        'L10_HIT': l10_hit,
+                        'L20_HIT': l20_hit,
+                        'CONFIDENCE': conf_score
                     })
 
     # Display results
@@ -634,18 +748,14 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
         
         print(f"   Removed {len(best_bets) - len(deduped_bets)} duplicate entries")
         
-        # Sort by tier and edge
-        tier_order = {'ELITE': 0, 'STRONG': 1, 'DECENT': 2, 'RISKY': 3, 'AVOID': 4}
-        # Extract tier name for sorting (TIER is "⭐ ELITE", we need "ELITE")
-        def _tier_key(b):
-            for name in tier_order:
-                if name in b.get('TIER', ''):
-                    return tier_order[name]
-            return 99
-        deduped_bets.sort(key=lambda x: (_tier_key(x), -abs(x['PCT_EDGE'])))
+        # Sort purely by mathematical edge
+        def _sort_key(b):
+            return -abs(b['PCT_EDGE'])
+            
+        deduped_bets.sort(key=_sort_key)
         
-        # Take top 20 with market diversity — ensure every stat type is covered
-        def _diverse_top(bets, n=20):
+        # Take top 30 with market diversity — ensure every stat type gets exposure
+        def _diverse_top(bets, n=30):
             """Pick best bet per market first, then fill to n."""
             if len(bets) <= n:
                 return bets[:n]
@@ -661,29 +771,25 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 if key not in seen and len(result) < n:
                     result.append(b)
                     seen.add(key)
-            result.sort(key=lambda x: (_tier_key(x), -abs(x['PCT_EDGE'])))
+            result.sort(key=_sort_key)
             return result[:n]
 
-        top_overs  = _diverse_top([b for b in deduped_bets if b['EDGE'] > 0])
-        top_unders = _diverse_top([b for b in deduped_bets if b['EDGE'] < 0])
-
+        top_plays = _diverse_top(deduped_bets, n=30)
+        
         # Table format — consistent column widths, spacing, separator
-        sep = "-" * 73
-        print("\n  TOP 10 OVERS (Highest Value)")
+        sep = "-" * 106
+        
+        print("\n  🚀 TOP 30 PLAYS BY AI EDGE % 🚀")
         print()
-        print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<5} | {'AI vs PP':<15} | {'EDGE %':<8}")
+        print(f" {'TIER':<10} | {'PLAYER':<22} | {'STAT':<10} | {'AI vs PP':^17} | {'EDGE %':>8} | {'O/U':^5} | {'L10 HIT':>7} | {'CONF':>5}")
         print(sep)
-        for bet in top_overs:
-            print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<5} | "
-                  f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}%")
-
-        print("\n  TOP 10 UNDERS (Lowest Value)")
-        print()
-        print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<5} | {'AI vs PP':<15} | {'EDGE %':<8}")
-        print(sep)
-        for bet in top_unders:
-            print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<5} | "
-                  f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}%")
+        for bet in top_plays:
+            direction = "OVER" if bet['EDGE'] > 0 else "UNDER"
+            l10_pct = f"{bet['L10_HIT']*100:.0f}%"
+            edge_str = f"{bet['PCT_EDGE']:.1f}%"
+            target_str = bet['TARGET'].replace('_1H', ' 1H').replace('FPTS', 'FSCR')
+            print(f" {bet['TIER']:<10} | {bet['NAME'][:22]:<22} | {target_str:<10} | "
+                  f"{bet['AI']:>7.2f} vs {bet['PP']:>6.2f} | {edge_str:>8} | {direction:^5} | {l10_pct:>7} | {bet['CONFIDENCE']:>5.1f}")
 
         # Determine save filename based on actual date used
         if actual_date:
@@ -722,13 +828,27 @@ _STAT_SEASON_COLS = {
 }
 
 
+def _get_position_category(pos):
+    """Map raw NBA positions to Guard, Wing, Big for injury tracking."""
+    pos = str(pos).upper()
+    if 'C' in pos: return 'Big'
+    if 'F' in pos: return 'Wing'
+    return 'Guard'
+
+
 def _calculate_injury_adjustments_fast(latest_rows_map, team_players, active_pid):
     """
     Optimized version of injury adjustments using pre-computed cache.
+    Distributes 50% globally across usage, 50% positionally across usage.
     """
-    # --- Gather last-row data for every teammate ---
-    out_production = {}       # stat -> total missing production
-    active_usage   = {}       # pid  -> usage rate (for active players)
+    out_production_global = {}
+    out_production_pos = {'Guard': {}, 'Wing': {}, 'Big': {}}
+    
+    active_usage_global = {}
+    active_usage_pos = {'Guard': {}, 'Wing': {}, 'Big': {}}
+
+    active_last = latest_rows_map.get(active_pid, {})
+    active_cat = _get_position_category(active_last.get('POSITION', 'G'))
 
     for pid in team_players:
         last = latest_rows_map.get(pid)
@@ -736,31 +856,42 @@ def _calculate_injury_adjustments_fast(latest_rows_map, team_players, active_pid
         
         pname = last['PLAYER_NAME']
         usage = last.get('USAGE_RATE_Season', 0)
+        pos = last.get('POSITION', 'G')
+        cat = _get_position_category(pos)
 
         if get_player_status(pname) == 'OUT':
             # Accumulate missing production
             for stat, col in _STAT_SEASON_COLS.items():
                 val = last.get(col, 0)
-                # Check for nan/None
-                if val and val > 0:
-                     out_production[stat] = out_production.get(stat, 0) + val
+                if pd.notna(val) and val > 0:
+                     out_production_global[stat] = out_production_global.get(stat, 0) + val
+                     out_production_pos[cat][stat] = out_production_pos[cat].get(stat, 0) + val
         else:
             if usage > 0:
-                active_usage[pid] = usage
+                active_usage_global[pid] = usage
+                active_usage_pos[cat][pid] = usage
 
-    if not out_production or active_pid not in active_usage:
+    if not out_production_global or active_pid not in active_usage_global:
         return {}  # nothing to adjust
 
-    # --- Redistribute proportionally by usage share ---
-    total_active_usage = sum(active_usage.values())
-    if total_active_usage == 0: return {}
-    
-    player_share = active_usage[active_pid] / total_active_usage
+    # BLEND: 50% Positional, 50% Global
+    total_active_usage = sum(active_usage_global.values())
+    global_share = active_usage_global[active_pid] / total_active_usage if total_active_usage > 0 else 0
+
+    cat_usage = sum(active_usage_pos[active_cat].values())
+    pos_share = active_usage_pos[active_cat][active_pid] / cat_usage if cat_usage > 0 else 0
 
     adjustments = {}
-    for stat, missing_total in out_production.items():
+    for stat in _STAT_SEASON_COLS.keys():
         rate = ABSORPTION_RATES.get(stat, 0.40)
-        adj  = missing_total * player_share * rate
+        
+        missing_global = out_production_global.get(stat, 0) * 0.5
+        adj_global = missing_global * global_share * rate
+        
+        missing_pos = out_production_pos[active_cat].get(stat, 0) * 0.5
+        adj_pos = missing_pos * pos_share * rate
+
+        adj = adj_global + adj_pos
         if abs(adj) > 0.01:
             adjustments[stat] = round(adj, 2)
 
@@ -805,9 +936,18 @@ def _calculate_injury_adjustments(df_history, team_id, active_pid):
     team_df = df_history[(df_history[season_col] == current_season) & (df_history['TEAM_ID'] == team_id)]
     all_pids = team_df['PLAYER_ID'].unique()
 
+    # Get active player's category
+    active_cat = 'Guard'
+    active_rows = team_df[team_df['PLAYER_ID'] == active_pid].sort_values('GAME_DATE')
+    if not active_rows.empty:
+        active_cat = _get_position_category(active_rows.iloc[-1].get('POSITION', 'G'))
+
     # --- Gather last-row data for every teammate ---
-    out_production = {}       # stat -> total missing production
-    active_usage   = {}       # pid  -> usage rate (for active players)
+    out_production_global = {}
+    out_production_pos = {'Guard': {}, 'Wing': {}, 'Big': {}}
+    
+    active_usage_global = {}
+    active_usage_pos = {'Guard': {}, 'Wing': {}, 'Big': {}}
 
     for pid in all_pids:
         p_rows = team_df[team_df['PLAYER_ID'] == pid].sort_values('GAME_DATE')
@@ -816,28 +956,42 @@ def _calculate_injury_adjustments(df_history, team_id, active_pid):
         last = p_rows.iloc[-1]
         pname = last['PLAYER_NAME']
         usage = last.get('USAGE_RATE_Season', 0)
+        pos = last.get('POSITION', 'G')
+        cat = _get_position_category(pos)
 
         if get_player_status(pname) == 'OUT':
             # Accumulate missing production
             for stat, col in _STAT_SEASON_COLS.items():
                 val = last.get(col, 0)
                 if pd.notna(val) and val > 0:
-                    out_production[stat] = out_production.get(stat, 0) + val
+                    out_production_global[stat] = out_production_global.get(stat, 0) + val
+                    out_production_pos[cat][stat] = out_production_pos[cat].get(stat, 0) + val
         else:
             if usage > 0:
-                active_usage[pid] = usage
+                active_usage_global[pid] = usage
+                active_usage_pos[cat][pid] = usage
 
-    if not out_production or active_pid not in active_usage:
+    if not out_production_global or active_pid not in active_usage_global:
         return {}  # nothing to adjust
 
-    # --- Redistribute proportionally by usage share ---
-    total_active_usage = sum(active_usage.values())
-    player_share = active_usage[active_pid] / total_active_usage
+    # BLEND: 50% Positional, 50% Global
+    total_active_usage = sum(active_usage_global.values())
+    global_share = active_usage_global[active_pid] / total_active_usage if total_active_usage > 0 else 0
+
+    cat_usage = sum(active_usage_pos[active_cat].values())
+    pos_share = active_usage_pos[active_cat][active_pid] / cat_usage if cat_usage > 0 else 0
 
     adjustments = {}
-    for stat, missing_total in out_production.items():
+    for stat in _STAT_SEASON_COLS.keys():
         rate = ABSORPTION_RATES.get(stat, 0.40)
-        adj  = missing_total * player_share * rate
+        
+        missing_global = out_production_global.get(stat, 0) * 0.5
+        adj_global = missing_global * global_share * rate
+        
+        missing_pos = out_production_pos[active_cat].get(stat, 0) * 0.5
+        adj_pos = missing_pos * pos_share * rate
+
+        adj = adj_global + adj_pos
         if abs(adj) > 0.01:
             adjustments[stat] = round(adj, 2)
 
@@ -1039,8 +1193,8 @@ def scout_player(df_history, models):
 
         # (G) = goblin alt line, (D) = demon alt line
         print()
-        print(f" TIER | STAT | {'PROJ':<14} | {'LINE':^11} | {'WIN%':>6} | SIDE")
-        print("-" * 78)
+        print(f" {'TIER':<10} | {'STAT':<8} | {'PROJ':<14} | {'LINE':^11} | {'WIN%':>6} | SIDE")
+        print("-" * 82)
 
         input_row = prepare_features(player_data, is_home=is_home, missing_usage=missing_usage_today)
 
@@ -1050,7 +1204,7 @@ def scout_player(df_history, models):
 
         for target in TARGETS:
             if target in models:
-                tier_emoji    = MODEL_QUALITY.get(target, {}).get('emoji', '?')
+                tier_text     = MODEL_QUALITY.get(target, {}).get('tier', 'UNKNOWN')
                 model_features = [f for f in models[target].feature_names_in_]
                 valid_input   = input_row.reindex(columns=model_features, fill_value=0)
                 base_pred     = float(models[target].predict(valid_input)[0])
@@ -1117,11 +1271,11 @@ def scout_player(df_history, models):
                     else:
                         side_str = f"▼ Under ({diff:.2f})"
 
-                # Pad tier to fixed terminal width
-                pad           = " " * max(0, TIER_WIDTH - _term_width(tier_emoji))
-                tier_col      = tier_emoji + pad
+                # Format Tier and Target natively without emojis
+                tier_col = f"{tier_text:<10}"
+                target_str = target.replace('_1H', ' 1H').replace('FPTS', 'FSCR')
                 proj_str = f"{pred:>6.2f}       "
-                print(f" {tier_col}| {target:<4} | {proj_str:<14} | {line_str} | {win_pct_str} | {side_str}")
+                print(f" {tier_col} | {target_str:<8} | {proj_str:<14} | {line_str} | {win_pct_str} | {side_str}")
 
         if input("\nScout another player? (y/n): ").lower() != 'y':
             scouting = False

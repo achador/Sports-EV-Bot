@@ -147,6 +147,16 @@ def run_correlated_scanner():
             input("Press Enter...")
             return
 
+        # --- Preprocessing: 1H Namespacing ---
+        # If the row is from NBA1H, prefix the stat so mappings.py can find it as '1H Points' etc.
+        def _namespace_stat(row):
+            stat = str(row['Stat'])
+            league = str(row.get('League', '')).upper()
+            if league == 'NBA1H' and not stat.startswith('1H '):
+                return f"1H {stat}"
+            return stat
+
+        pp_df['Stat'] = pp_df.apply(_namespace_stat, axis=1)
         pp_df['Stat'] = pp_df['Stat'].replace(PP_NORMALIZATION_MAP)
 
         # --- FanDuel ---
@@ -227,10 +237,10 @@ def run_correlated_scanner():
             combined_score = ((math_rank * 0.5) + (ai_rank * 0.5)) * 10 * stat_weight
 
             tier_info  = MODEL_QUALITY.get(row['Stat'], {})
-            tier_emoji = tier_info.get('emoji', '?')
+            tier_text  = tier_info.get('tier', '-')
 
             correlated_plays.append({
-                'Tier': tier_emoji, 'Player': row['Player_x'], 'Stat': row['Stat'],
+                'Tier': tier_text, 'Player': row['Player_x'], 'Stat': row['Stat'],
                 'Line': line, 'Side': math_side, 'Win%': win_pct,
                 'AI_Proj': ai_proj, 'Score': round(combined_score, 1),
                 'FD_Line': row.get('FD_Line', line),
@@ -254,7 +264,7 @@ def run_correlated_scanner():
             return (' ' * spaces + s) if align == 'right' else (s + ' ' * spaces)
 
         # Column widths
-        W_RANK=3; W_TIER=4; W_PLAYER=24; W_STAT=5; W_LINE=6
+        W_RANK=3; W_TIER=10; W_PLAYER=24; W_STAT=7; W_LINE=6
         W_SIDE=8; W_WIN=7; W_AI=7; W_SCORE=6; W_LDIFF=5
         SEP = " │ "
         total_w = W_RANK+W_TIER+W_PLAYER+W_STAT+W_LINE+W_SIDE+W_WIN+W_AI+W_SCORE+W_LDIFF + len(SEP)*9
@@ -296,7 +306,7 @@ def run_correlated_scanner():
                     pad(str(i+1),                    W_RANK,  'right') + SEP +
                     pad(tier,                         W_TIER)           + SEP +
                     pad(player,                       W_PLAYER)         + SEP +
-                    pad(str(row['Stat']),             W_STAT)           + SEP +
+                    pad(str(row['Stat']).replace('_1H', ' 1H').replace('FPTS', 'FSCR'), W_STAT) + SEP +
                     pad(f"{float(row['Line']):.1f}",  W_LINE,  'right') + SEP +
                     pad(side_cell,                    W_SIDE)           + SEP +
                     pad(f"{float(row['Win%']):.2f}%", W_WIN,   'right') + SEP +
@@ -310,7 +320,7 @@ def run_correlated_scanner():
         final_df = pd.DataFrame(correlated_plays)
         final_df = final_df.sort_values(by='Score', ascending=False)
         final_df = final_df.drop_duplicates(subset=['Player', 'Stat', 'Line', 'Side'], keep='first')
-        final_df['Tier'] = final_df['Tier'].replace({'?': '–', '~': '–'})
+        final_df = final_df.drop_duplicates(subset=['Player', 'Stat', 'Line', 'Side'], keep='first')
 
         # ── Main table: overall top 20 ─────────────────────────────────────
         print_table(final_df, "TOP 20 CORRELATED PLAYS  --  Math + AI Confidence", limit=30)
@@ -336,8 +346,8 @@ def run_correlated_scanner():
                 stat_df = final_df[final_df['Stat'] == stat]
                 if stat_df.empty:
                     continue
-                label = STAT_LABELS.get(stat, stat)
-                print_table(stat_df, f"  {label} ({stat})  —  Top 3", limit=3)
+                label = STAT_LABELS.get(stat, stat).replace('_1H', ' 1H').replace('FPTS', 'FSCR')
+                print_table(stat_df, f"  {label} ({stat.replace('_1H', ' 1H').replace('FPTS', 'FSCR')})  —  Top 3", limit=3)
 
         # ── Save ───────────────────────────────────────────────────────────
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -360,6 +370,15 @@ def run_odds_scanner():
         pp    = PrizePicksClient(stat_map=STAT_MAP)
         pp_df = pp.fetch_board(league_filter='NBA')
         if not pp_df.empty:
+            # --- Preprocessing: 1H Namespacing ---
+            def _namespace_stat(row):
+                stat = str(row['Stat'])
+                league = str(row.get('League', '')).upper()
+                if league == 'NBA1H' and not stat.startswith('1H '):
+                    return f"1H {stat}"
+                return stat
+            
+            pp_df['Stat'] = pp_df.apply(_namespace_stat, axis=1)
             pp_df['Stat'] = pp_df['Stat'].replace(PP_NORMALIZATION_MAP)
         print(f"Got {len(pp_df)} PrizePicks props.")
 
