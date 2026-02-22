@@ -28,56 +28,61 @@ MODEL_DIR   = os.path.join(BASE_DIR, 'models', 'nba')
 TARGETS = [
     'PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'BLK', 'STL', 'TOV',
     'PRA', 'PR', 'PA', 'RA', 'SB',
-    'FGM', 'FGA', 'FTM', 'FTA', 'NBA_FANTASY_PTS',
-    'PTS_1H', 'REB_1H', 'AST_1H', 'FG3M_1H', 'FG3A_1H', 'BLK_1H', 'STL_1H', 'TOV_1H',
-    'PRA_1H', 'PR_1H', 'PA_1H', 'RA_1H', 'SB_1H',
-    'FGM_1H', 'FGA_1H', 'FTM_1H', 'FTA_1H', 'NBA_FANTASY_PTS_1H'
+    'FGM', 'FGA', 'FTM', 'FTA', 'FPTS',
+    'PTS_1H', 'PRA_1H', 'FPTS_1H'
 ]
 
-FEATURES = [
-    'PTS_L5', 'PTS_L10', 'PTS_L20', 'PTS_Season', 'PTS_L5_Median', 'PTS_L10_Median',
-    'REB_L5', 'REB_L10', 'REB_L20', 'REB_Season', 'REB_L5_Median', 'REB_L10_Median',
-    'AST_L5', 'AST_L10', 'AST_L20', 'AST_Season', 'AST_L5_Median', 'AST_L10_Median',
-    'FG3M_L5', 'FG3M_L10', 'FG3M_L20', 'FG3M_Season', 'FG3M_L5_Median', 'FG3M_L10_Median',
-    'FG3A_L5', 'FG3A_L10', 'FG3A_L20', 'FG3A_Season', 'FG3A_L5_Median', 'FG3A_L10_Median',
-    'STL_L5', 'STL_L10', 'STL_L20', 'STL_Season', 'STL_L5_Median', 'STL_L10_Median',
-    'BLK_L5', 'BLK_L10', 'BLK_L20', 'BLK_Season', 'BLK_L5_Median', 'BLK_L10_Median',
-    'TOV_L5', 'TOV_L10', 'TOV_L20', 'TOV_Season', 'TOV_L5_Median', 'TOV_L10_Median',
-    'FGM_L5', 'FGM_L10', 'FGM_L20', 'FGM_Season', 'FGM_L5_Median', 'FGM_L10_Median',
-    'FGA_L5', 'FGA_L10', 'FGA_L20', 'FGA_Season', 'FGA_L5_Median', 'FGA_L10_Median',
-    'FTM_L5', 'FTM_L10', 'FTM_L20', 'FTM_Season', 'FTM_L5_Median', 'FTM_L10_Median',
-    'FTA_L5', 'FTA_L10', 'FTA_L20', 'FTA_Season', 'FTA_L5_Median', 'FTA_L10_Median',
-    'MIN_L5', 'MIN_L10', 'MIN_L20', 'MIN_Season', 'MIN_L5_Median', 'MIN_L10_Median',
-    'GAME_SCORE_L5', 'GAME_SCORE_L10', 'GAME_SCORE_L20', 'GAME_SCORE_Season', 'GAME_SCORE_L5_Median', 'GAME_SCORE_L10_Median',
-    'USAGE_RATE_L5', 'USAGE_RATE_L10', 'USAGE_RATE_L20', 'USAGE_RATE_Season', 'USAGE_RATE_L5_Median', 'USAGE_RATE_L10_Median',
-    'MISSING_USAGE',
-    'DAYS_REST', 'IS_HOME',
-    'GAMES_7D', 'IS_4_IN_6', 'IS_B2B', 'IS_FRESH',
-    'PACE_ROLLING',
-    'USAGE_VACUUM', 'STAR_COUNT',
-    # NEW FEATURES
-    'NBA_FANTASY_PTS_L5', 'NBA_FANTASY_PTS_L10', 'NBA_FANTASY_PTS_L20', 'NBA_FANTASY_PTS_Season', 'NBA_FANTASY_PTS_L5_Median', 'NBA_FANTASY_PTS_L10_Median',
-    'PTS_LOC_MEAN', 'REB_LOC_MEAN', 'AST_LOC_MEAN', 'FG3M_LOC_MEAN', 'PRA_LOC_MEAN',
-    'OPP_WIN_PCT', 'IS_VS_ELITE_TEAM'
-]
-
-# Add 1H specific features
-for stat in ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL', 'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA', 'MIN', 'NBA_FANTASY_PTS']:
-    FEATURES.extend([
-        f'{stat}_1H_L5', f'{stat}_1H_L10', f'{stat}_1H_L20', f'{stat}_1H_Season',
-        f'{stat}_1H_L5_Median', f'{stat}_1H_L10_Median'
-    ])
-
-for combo in ['PRA', 'PR', 'PA', 'RA', 'SB', 'PRA_1H', 'PR_1H', 'PA_1H', 'RA_1H', 'SB_1H']:
-    FEATURES.extend([f'{combo}_L5', f'{combo}_L10', f'{combo}_L20', f'{combo}_Season', f'{combo}_L5_Median', f'{combo}_L10_Median'])
-
-for stat in ['PTS', 'REB', 'AST', 'FG3M', 'FGA', 'BLK', 'STL', 'TOV', 'FGM', 'FTM', 'FTA']:
-    FEATURES.append(f'OPP_{stat}_ALLOWED')
-    FEATURES.append(f'OPP_{stat}_ALLOWED_DIFF')  # New DvP Diff
-
-for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
-    FEATURES.append(f'OPP_{combo}_ALLOWED')
-    FEATURES.append(f'OPP_{combo}_ALLOWED_DIFF')  # New DvP Diff
+def get_features_for_target(target):
+    """
+    Dynamically select features based on the target to reduce noise.
+    For example, the AST model doesn't need to look at BLK_L5.
+    """
+    # Core context features that help every model
+    core = [
+        'MIN_Season', 'MIN_L5', 'MIN_L10', 'USAGE_RATE_Season', 'USAGE_RATE_L5', 'USAGE_RATE_L10',
+        'DAYS_REST', 'IS_HOME', 'GAMES_7D', 'IS_4_IN_6', 'IS_B2B', 'IS_FRESH',
+        'PACE_ROLLING', 'USAGE_VACUUM', 'STAR_COUNT', 'GAME_SCORE_Season', 'GAME_SCORE_L5'
+    ]
+    
+    # Determine which statistical families to include
+    target_stats = []
+    
+    if target in ['PTS', 'FGM', 'FGA', 'FTM', 'FTA', 'FG3M', 'FG3A']:
+        target_stats = ['PTS', 'FGM', 'FGA', 'FTM', 'FTA', 'FG3M', 'FG3A']
+    elif target in ['REB']:
+        target_stats = ['REB', 'PTS', 'FGA']
+    elif target in ['AST']:
+        target_stats = ['AST', 'PTS', 'FGA', 'TOV']
+    elif target in ['STL', 'BLK', 'TOV']:
+        target_stats = ['STL', 'BLK', 'TOV']
+    elif target in ['PRA', 'PR', 'PA', 'RA']:
+        target_stats = ['PTS', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA', 'FGA']
+    elif target in ['SB']:
+        target_stats = ['STL', 'BLK', 'SB']
+    elif target in ['FPTS']:
+        target_stats = ['FPTS', 'PTS', 'REB', 'AST', 'BLK', 'STL', 'TOV']
+    elif target in ['PTS_1H', 'PRA_1H', 'FPTS_1H']:
+        target_stats = ['PTS_1H', 'PTS', 'FGA_1H', 'MIN_1H']
+        if target == 'PRA_1H': target_stats.extend(['PRA_1H', 'PRA'])
+        if target == 'FPTS_1H': target_stats.extend(['FPTS_1H', 'FPTS'])
+    
+    features = list(core)
+    
+    # Generate the rolling variants for these specific stats
+    for stat in target_stats:
+        for variant in [f'{stat}_Season', f'{stat}_L5', f'{stat}_L10', f'{stat}_L20', f'{stat}_L5_Median', f'{stat}_L10_Median']:
+            features.append(variant)
+            
+        # Add Defensive Matchup (DvP) if applicable
+        if stat in ['PTS', 'REB', 'AST', 'FG3M', 'FGA', 'BLK', 'STL', 'TOV', 'FGM', 'FTM', 'FTA', 'PRA', 'PR', 'PA', 'RA', 'SB']:
+            features.append(f'OPP_{stat}_ALLOWED')
+            features.append(f'OPP_{stat}_ALLOWED_DIFF')
+            
+    # Add Location means if predicting main stats
+    if target in ['PTS', 'REB', 'AST', 'FG3M', 'PRA']:
+        features.append(f'{target}_LOC_MEAN')
+        
+    return list(dict.fromkeys(features))
 
 
 def ensure_combo_stats(df):
@@ -133,7 +138,12 @@ def train_and_evaluate():
             print(f" -> SKIPPING {target} (Column not found in data)")
             continue
 
-        features_to_use = FEATURES
+        # Filter requested features to ensure they actually exist in the dataframe
+        raw_features = get_features_for_target(target)
+        features_to_use = [f for f in raw_features if f in df.columns]
+        
+        # Log how many features were pruned
+        print(f"   -> Using {len(features_to_use)} specialized features for {target} (Pruned {len(df.columns) - len(features_to_use)})")
 
         X_train = train_df[features_to_use]
         y_train = train_df[target]

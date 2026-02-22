@@ -216,7 +216,7 @@ The player scout shows per-stat projections, PrizePicks lines (including goblin/
 
 - **PrizePicks**: partner API, free, no key needed. Cached for 10 minutes.
 - **FanDuel (via the-odds-api)**: requires API key, costs credits per call. Cached for 10 minutes. The Odds Scanner auto-detects the active game slate date to minimize unnecessary calls.
-- **nba_api**: free, no key needed. Used for game schedules and historical data.
+- **nba_api**: free, no key needed. Used for game schedules and historical data. Features a custom network resilience layer with 30-second timeouts and automatic 5-attempt rapid retries to handle frequent `stats.nba.com` connection blackholing.
 - **ESPN/CBS Sports**: scraped for live injury reports. No key needed.
 
 ---

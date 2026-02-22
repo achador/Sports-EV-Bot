@@ -79,7 +79,6 @@ class PrizePicksClient:
         'Total Games Won':       'games_won',
         'Total Sets':            'total_sets',
         'Aces':                  'aces',
-        'Fantasy Score':         'fantasy_score',
         'Break Points Won':      'bp_won',
         'Total Tie Breaks':      'total_tiebreaks',
         'Double Faults':         'double_faults',
@@ -125,7 +124,7 @@ class PrizePicksClient:
     # Public interface
     # -----------------------------------------------------------------------
 
-    def fetch_board(self, league_filter=None, date_filter=None, include_alts=False):
+    def fetch_board(self, league_filter=None, date_filter=None, include_alts=False, league_id=None):
         """
         Fetch current PrizePicks prop board.
 
@@ -133,6 +132,7 @@ class PrizePicksClient:
             league_filter (str): e.g. 'NBA' or 'TENNIS' — filters by league name.
             date_filter   (str): e.g. '2026-02-19' — filters by game date.
             include_alts (bool): If True, include goblin/demon alt lines.
+            league_id     (int): Direct league ID filter for the API.
 
         Returns:
             pd.DataFrame with columns: Player, League, Stat, Line, Date, OddsType
@@ -147,10 +147,24 @@ class PrizePicksClient:
             return self._apply_filters(df, league_filter, date_filter)
 
         # --- 2. Build URL ---
-        # Always fetch ALL leagues in one shot. Filtering happens client-side
-        # via _apply_filters(), so the cache works across league switches.
-        url = self.BASE_URL
+        # League-specific fetch to avoid board truncation (1000 line limit)
+        active_ids = []
+        if league_id:
+            active_ids = [league_id] if isinstance(league_id, (int, str)) else league_id
+        elif league_filter:
+            # Expand 'NBA' to include its sub-leagues (1H, 1Q)
+            if league_filter.upper() == 'NBA':
+                active_ids = [7, 84, 192]
+            else:
+                l_id = self.LEAGUE_ID_MAP.get(league_filter.upper())
+                if l_id: active_ids = [l_id]
 
+        url = self.BASE_URL
+        if active_ids:
+            # Append each league_id to the query
+            for lid in active_ids:
+                url += f"&league_id[]={lid}"
+        
         # Small random delay — be polite
         time.sleep(random.uniform(0.5, 1.5))
 
@@ -219,11 +233,20 @@ class PrizePicksClient:
             player   = row['Player']
             raw_stat = row['Stat']
             line     = row['Line']
+            league   = row.get('League', '')
             if not player:
                 continue
             if player not in lines_dict:
                 lines_dict[player] = {}
+                
             norm_stat = self.STAT_NORMALIZATION.get(raw_stat, self.stat_map.get(raw_stat, raw_stat))
+            
+            # CRITICAL FIX: PrizePicks uses the same raw stat names ("Points") for both
+            # the full game 'NBA' tab and the 1st half 'NBA1H' tab.
+            # If the league is NBA1H, we MUST append '_1H' so it targets the right model.
+            if league.upper() == 'NBA1H' and not norm_stat.endswith('_1H'):
+                norm_stat = f"{norm_stat}_1H"
+                
             lines_dict[player][norm_stat] = float(line)
 
         return lines_dict
@@ -327,10 +350,16 @@ class PrizePicksClient:
             player   = row['Player']
             raw_stat = row['Stat']
             line     = row['Line']
+            league   = row.get('League', '')
             odds_type = row.get('OddsType', 'standard') or 'standard'
             if not player:
                 continue
+                
             norm_stat = self.STAT_NORMALIZATION.get(raw_stat, self.stat_map.get(raw_stat, raw_stat))
+            
+            if league.upper() == 'NBA1H' and not norm_stat.endswith('_1H'):
+                norm_stat = f"{norm_stat}_1H"
+                
             if player not in lines_dict:
                 lines_dict[player] = {}
             # Prefer standard over alt — only overwrite if upgrading to standard
@@ -348,14 +377,16 @@ class PrizePicksClient:
             return df
         df_all = df  # keep reference to full board for diagnostics
         if league_filter:
-            # Try exact match first, then case-insensitive
-            exact = df[df['League'] == league_filter]
-            if exact.empty:
-                df = df[df['League'].str.upper() == league_filter.upper()]
-            else:
-                df = exact
+            # Expand 'NBA' filter to automatically include 'NBA1H'
+            allowed_leagues = [league_filter.upper()]
+            if league_filter.upper() == 'NBA':
+                allowed_leagues.append('NBA1H')
+                
+            df = df[df['League'].str.upper().isin(allowed_leagues)]
+            
         if date_filter:
             df = df[df['Date'] == date_filter]
+            
         if df.empty:
             # Show available leagues to help diagnose
             avail = df_all['League'].unique().tolist()

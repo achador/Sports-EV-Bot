@@ -27,9 +27,8 @@ POS_FILE    = os.path.join(BASE_DIR, 'data', 'nba', 'processed', 'player_positio
 OUTPUT_FILE = os.path.join(BASE_DIR, 'data', 'nba', 'processed', 'training_dataset.csv')
 
 TARGET_STATS = ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL',
-                'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA', 'NBA_FANTASY_PTS',
-                'PTS_1H', 'REB_1H', 'AST_1H', 'FG3M_1H', 'STL_1H', 'BLK_1H', 'TOV_1H',
-                'FGM_1H', 'FGA_1H', 'FTM_1H', 'FTA_1H', 'NBA_FANTASY_PTS_1H', 'FG3A_1H']
+                'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA', 'FPTS',
+                'PTS_1H', 'FPTS_1H']
 
 
 def load_and_merge_data():
@@ -65,6 +64,11 @@ def load_and_merge_data():
     else:
         print(f"Warning: {RAW_1H_FILE} not found. 1H features will not be built.")
 
+    # Calculate FPTS using exact PrizePicks scoring formula
+    df['FPTS'] = (df['PTS'] * 1) + (df['REB'] * 1.2) + (df['AST'] * 1.5) + (df['BLK'] * 3) + (df['STL'] * 3) - df['TOV']
+    if 'PTS_1H' in df.columns:
+        df['FPTS_1H'] = (df['PTS_1H'] * 1) + (df['REB_1H'] * 1.2) + (df['AST_1H'] * 1.5) + (df['BLK_1H'] * 3) + (df['STL_1H'] * 3) - df['TOV_1H']
+
     print(f"   Loaded {len(df):,} game logs for {df['PLAYER_ID'].nunique():,} players")
     return df
 
@@ -89,11 +93,10 @@ def add_rolling_features(df):
     df['CAREER_GAMES'] = df.groupby('PLAYER_ID').cumcount() + 1
     grouped = df.groupby('PLAYER_ID')
     base_stats = ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL', 'BLK', 'TOV', 'FGM', 'FGA', 'FTM', 'FTA']
-    stats_to_roll = base_stats + ['MIN', 'GAME_SCORE', 'USAGE_RATE', 'NBA_FANTASY_PTS']
+    stats_to_roll = base_stats + ['MIN', 'GAME_SCORE', 'USAGE_RATE', 'FPTS']
     
-    # Add 1H equivalents
-    stats_to_roll.extend([s + '_1H' for s in base_stats])
-    stats_to_roll.extend(['MIN_1H', 'NBA_FANTASY_PTS_1H'])
+    # Add 1H equivalents (Only keeping highly liquid markets to reduce noise)
+    stats_to_roll.extend(['PTS_1H', 'MIN_1H', 'FPTS_1H'])
     
     for combo in ['PRA', 'PR', 'PA', 'RA', 'SB', 'PRA_1H', 'PR_1H', 'PA_1H', 'RA_1H', 'SB_1H']:
         if combo in df.columns:

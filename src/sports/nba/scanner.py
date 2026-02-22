@@ -193,16 +193,16 @@ def calculate_confidence_score(edge_pct, l10_hit, opponent_win_pct=None, is_role
     """
     Generate an Elite Confidence Score (0-100).
     Components:
-    - 40%: Model Edge %
-    - 40%: L10 Hit Rate
+    - 60%: Model Edge %
+    - 20%: L10 Hit Rate
     - 20%: Matchup Quality
     """
-    # Max out edge score at 15% Edge (scales 0-40)
+    # Max out edge score at 15% Edge (scales 0-60)
     edge_cap = min(abs(edge_pct), 15.0)
-    edge_score = (edge_cap / 15.0) * 40.0
+    edge_score = (edge_cap / 15.0) * 60.0
     
     # Hit rate score (Hit rate for overs, miss rate for unders)
-    hit_score = l10_hit * 40.0
+    hit_score = l10_hit * 20.0
     
     # Matchup Score (Simple version based on Opponent strength)
     matchup_score = 10.0 # Base average
@@ -703,13 +703,17 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 if 'OPP_WIN_PCT' in valid_input.columns:
                     opp_win_pct = valid_input['OPP_WIN_PCT'].iloc[0]
 
-                # We can't divide by zero if line is 0, safely handled above. Calculate proper percent.
-                pct_edge_safe = (edge_val / line) * 100 if line else 0
+                # Low-Line Mathematical Variance Fix:
+                # Dividing by 0.5 can inflate a 0.38 block edge into a 76% edge.
+                # We enforce a baseline statistical denominator of 2.0.
+                safe_denominator = max(line, 2.0) if line else 2.0
+                
+                pct_edge_safe = (edge_val / safe_denominator) * 100
                 conf_score = calculate_confidence_score(pct_edge_safe, line_diff_for_hit, opp_win_pct, is_role_expansion)
 
                 if line is not None and line > 0:
                     edge = proj - line
-                    pct_edge = (edge / line) * 100
+                    pct_edge = (edge / safe_denominator) * 100
 
                     tier_info = MODEL_QUALITY.get(target, {})
 
@@ -721,7 +725,7 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                         'PP': round(line, 2),
                         'EDGE': edge,
                         'PCT_EDGE': pct_edge,
-                        'TIER': tier_info.get('emoji', '~') + ' ' + tier_info.get('tier', 'UNKNOWN'),
+                        'TIER': tier_info.get('tier', 'UNKNOWN'),
                         'THRESHOLD': tier_info.get('threshold', 2.5),
                         'L5_HIT': l5_hit,
                         'L10_HIT': l10_hit,
@@ -744,24 +748,14 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
         
         print(f"   Removed {len(best_bets) - len(deduped_bets)} duplicate entries")
         
-        # Sort by tier, hit rate, and edge
-        tier_order = {'ELITE': 0, 'STRONG': 1, 'DECENT': 2, 'RISKY': 3, 'AVOID': 4}
-        # Extract tier name for sorting (TIER is "⭐ ELITE", we need "ELITE")
-        def _tier_key(b):
-            for name in tier_order:
-                if name in b.get('TIER', ''):
-                    return tier_order[name]
-            return 99
-            
+        # Sort purely by mathematical edge
         def _sort_key(b):
-            # Prioritize Tier, then L10 Hit Rate (for Over) or Miss Rate (for Under), then Edge
-            hit_rate_score = b['L10_HIT'] if b['EDGE'] > 0 else (1.0 - b['L10_HIT'])
-            return (_tier_key(b), -hit_rate_score, -abs(b['PCT_EDGE']))
+            return -abs(b['PCT_EDGE'])
             
         deduped_bets.sort(key=_sort_key)
         
-        # Take top 20 with market diversity — ensure every stat type is covered
-        def _diverse_top(bets, n=20):
+        # Take top 30 with market diversity — ensure every stat type gets exposure
+        def _diverse_top(bets, n=30):
             """Pick best bet per market first, then fill to n."""
             if len(bets) <= n:
                 return bets[:n]
@@ -780,44 +774,22 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
             result.sort(key=_sort_key)
             return result[:n]
 
-        top_overs  = _diverse_top([b for b in deduped_bets if b['EDGE'] > 0], n=30)
-        top_unders = _diverse_top([b for b in deduped_bets if b['EDGE'] < 0], n=30)
+        top_plays = _diverse_top(deduped_bets, n=30)
         
-        # Pull strict elite plays.
-        elite_overs = [b for b in top_overs if b['CONFIDENCE'] >= 75.0]
-        elite_unders = [b for b in top_unders if b['CONFIDENCE'] >= 75.0]
-
         # Table format — consistent column widths, spacing, separator
-        sep = "-" * 98
+        sep = "-" * 106
         
-        if elite_overs or elite_unders:
-            print("\n  💎 ELITE CONFIDENCE PLAYS (Score >= 75) 💎")
-            print()
-            print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<10} | {'AI vs PP':<15} | {'EDGE %':<8} | {'L10 HIT':<7} | {'CONF':<5}")
-            print(sep)
-            for bet in elite_overs + elite_unders:
-                l10_pct = f"{bet['L10_HIT']*100:.0f}%"
-                print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<10} | "
-                      f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}% | {l10_pct:>6} | {bet['CONFIDENCE']:.1f}")
-        
-        
-        print("\n  TOP 15 OVERS (Highest Value & Hit Rate)")
+        print("\n  🚀 TOP 30 PLAYS BY AI EDGE % 🚀")
         print()
-        print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<10} | {'AI vs PP':<15} | {'EDGE %':<8} | {'L10 HIT':<7} | {'CONF':<5}")
+        print(f" {'TIER':<10} | {'PLAYER':<22} | {'STAT':<10} | {'AI vs PP':^17} | {'EDGE %':>8} | {'O/U':^5} | {'L10 HIT':>7} | {'CONF':>5}")
         print(sep)
-        for bet in top_overs[:15]:
+        for bet in top_plays:
+            direction = "OVER" if bet['EDGE'] > 0 else "UNDER"
             l10_pct = f"{bet['L10_HIT']*100:.0f}%"
-            print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<10} | "
-                  f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}% | {l10_pct:>6} | {bet['CONFIDENCE']:.1f}")
-
-        print("\n  TOP 15 UNDERS (Lowest Value & Miss Rate)")
-        print()
-        print(f" {'TIER':<12} | {'PLAYER':<20} | {'STAT':<10} | {'AI vs PP':<15} | {'EDGE %':<8} | {'L10 HIT':<7} | {'CONF':<5}")
-        print(sep)
-        for bet in top_unders[:15]:
-            l10_pct = f"{bet['L10_HIT']*100:.0f}%"
-            print(f" {bet['TIER']:<12} | {bet['NAME'][:20]:<20} | {bet['TARGET']:<10} | "
-                  f"{bet['AI']:>6.2f} vs {bet['PP']:>6.2f} | {bet['PCT_EDGE']:>6.1f}% | {l10_pct:>6} | {bet['CONFIDENCE']:.1f}")
+            edge_str = f"{bet['PCT_EDGE']:.1f}%"
+            target_str = bet['TARGET'].replace('_1H', ' 1H').replace('FPTS', 'FSCR')
+            print(f" {bet['TIER']:<10} | {bet['NAME'][:22]:<22} | {target_str:<10} | "
+                  f"{bet['AI']:>7.2f} vs {bet['PP']:>6.2f} | {edge_str:>8} | {direction:^5} | {l10_pct:>7} | {bet['CONFIDENCE']:>5.1f}")
 
         # Determine save filename based on actual date used
         if actual_date:
@@ -1221,8 +1193,8 @@ def scout_player(df_history, models):
 
         # (G) = goblin alt line, (D) = demon alt line
         print()
-        print(f" TIER | STAT | {'PROJ':<14} | {'LINE':^11} | {'WIN%':>6} | SIDE")
-        print("-" * 78)
+        print(f" {'TIER':<10} | {'STAT':<8} | {'PROJ':<14} | {'LINE':^11} | {'WIN%':>6} | SIDE")
+        print("-" * 82)
 
         input_row = prepare_features(player_data, is_home=is_home, missing_usage=missing_usage_today)
 
@@ -1232,7 +1204,7 @@ def scout_player(df_history, models):
 
         for target in TARGETS:
             if target in models:
-                tier_emoji    = MODEL_QUALITY.get(target, {}).get('emoji', '?')
+                tier_text     = MODEL_QUALITY.get(target, {}).get('tier', 'UNKNOWN')
                 model_features = [f for f in models[target].feature_names_in_]
                 valid_input   = input_row.reindex(columns=model_features, fill_value=0)
                 base_pred     = float(models[target].predict(valid_input)[0])
@@ -1299,11 +1271,11 @@ def scout_player(df_history, models):
                     else:
                         side_str = f"▼ Under ({diff:.2f})"
 
-                # Pad tier to fixed terminal width
-                pad           = " " * max(0, TIER_WIDTH - _term_width(tier_emoji))
-                tier_col      = tier_emoji + pad
+                # Format Tier and Target natively without emojis
+                tier_col = f"{tier_text:<10}"
+                target_str = target.replace('_1H', ' 1H').replace('FPTS', 'FSCR')
                 proj_str = f"{pred:>6.2f}       "
-                print(f" {tier_col}| {target:<4} | {proj_str:<14} | {line_str} | {win_pct_str} | {side_str}")
+                print(f" {tier_col} | {target_str:<8} | {proj_str:<14} | {line_str} | {win_pct_str} | {side_str}")
 
         if input("\nScout another player? (y/n): ").lower() != 'y':
             scouting = False

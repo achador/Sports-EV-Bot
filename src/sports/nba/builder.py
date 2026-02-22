@@ -56,19 +56,31 @@ def fetch_all_game_logs():
     print("This may take a few minutes...")
 
     for season in SEASONS:
-        print(f"Fetching logs for season: {season}...")
-        try:
-            logs = playergamelogs.PlayerGameLogs(
-                season_nullable=season,
-                league_id_nullable='00'
-            )
-            df = logs.get_data_frames()[0]
-            df['SEASON_ID'] = season
-            all_logs.append(df)
-            print(f" -> Found {len(df)} game rows for {season}")
-            time.sleep(1)
-        except Exception as e:
-            print(f"Error fetching {season}: {e}")
+        max_retries = 5
+        timeout_sec = 30
+        for attempt in range(max_retries):
+            try:
+                if attempt == 0:
+                    print(f"Fetching logs for season: {season}...")
+                else:
+                    print(f"   --> Retry {attempt}/{max_retries} for {season} (after timeout)...")
+                    
+                logs = playergamelogs.PlayerGameLogs(
+                    season_nullable=season,
+                    league_id_nullable='00',
+                    timeout=timeout_sec
+                )
+                df = logs.get_data_frames()[0]
+                df['SEASON_ID'] = season
+                all_logs.append(df)
+                print(f" -> Found {len(df)} game rows for {season}")
+                time.sleep(1)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                else:
+                    print(f"❌ Error fetching {season} after {max_retries} attempts.")
 
     if all_logs:
         master_df = pd.concat(all_logs, ignore_index=True)
@@ -90,20 +102,32 @@ def fetch_1h_game_logs():
     print(f"--- STARTING 1H HISTORICAL DOWNLOAD ({len(SEASONS)} Seasons) ---")
 
     for season in SEASONS:
-        print(f"Fetching 1H logs for season: {season}...")
-        try:
-            logs = playergamelogs.PlayerGameLogs(
-                season_nullable=season,
-                league_id_nullable='00',
-                game_segment_nullable='First Half'
-            )
-            df = logs.get_data_frames()[0]
-            df['SEASON_ID'] = season
-            all_logs.append(df)
-            print(f" -> Found {len(df)} 1H game rows for {season}")
-            time.sleep(1)
-        except Exception as e:
-            print(f"Error fetching 1H {season}: {e}")
+        max_retries = 5
+        timeout_sec = 30
+        for attempt in range(max_retries):
+            try:
+                if attempt == 0:
+                    print(f"Fetching 1H logs for season: {season}...")
+                else:
+                    print(f"   --> Retry {attempt}/{max_retries} for 1H {season}...")
+                    
+                logs = playergamelogs.PlayerGameLogs(
+                    season_nullable=season,
+                    league_id_nullable='00',
+                    game_segment_nullable='First Half',
+                    timeout=timeout_sec
+                )
+                df = logs.get_data_frames()[0]
+                df['SEASON_ID'] = season
+                all_logs.append(df)
+                print(f" -> Found {len(df)} 1H game rows for {season}")
+                time.sleep(1)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                else:
+                    print(f"❌ Error fetching 1H {season} after {max_retries} attempts.")
 
     if all_logs:
         master_df = pd.concat(all_logs, ignore_index=True)
@@ -144,15 +168,30 @@ def fetch_player_positions():
     for team in nba_teams:
         t_id = team['id']
         t_name = team['full_name']
-        print(f"Fetching roster for: {t_name}...")
-        try:
-            roster = commonteamroster.CommonTeamRoster(team_id=t_id, season='2025-26')
-            df = roster.get_data_frames()[0]
-            df = df[['PLAYER', 'PLAYER_ID', 'POSITION']]
-            all_rosters.append(df)
-            time.sleep(0.6)
-        except Exception as e:
-            print(f"Error fetching {t_name}: {e}")
+        
+        max_retries = 4
+        timeout_sec = 20
+        for attempt in range(max_retries):
+            try:
+                if attempt == 0:
+                    print(f"Fetching roster for: {t_name}...", end=" ")
+                
+                roster = commonteamroster.CommonTeamRoster(
+                    team_id=t_id, 
+                    season='2025-26',
+                    timeout=timeout_sec
+                )
+                df = roster.get_data_frames()[0]
+                df = df[['PLAYER', 'PLAYER_ID', 'POSITION']]
+                all_rosters.append(df)
+                print("✓")
+                time.sleep(0.6)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                else:
+                    print(f"❌ Failed after {max_retries} attempts.")
 
     if all_rosters:
         master_roster = pd.concat(all_rosters, ignore_index=True)
