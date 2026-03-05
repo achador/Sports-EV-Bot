@@ -1,15 +1,16 @@
 """
 Props Edge Analyzer - FanDuel vs PrizePicks Comparison
 
-NOW WITH LINE-ADJUSTED WIN% CALCULATION!
+Devigged + Line-Adjusted WIN% Calculation.
 
-Calculates implied probability from FanDuel odds,
-THEN adjusts for PrizePicks line differences to show YOUR actual win rate.
+Calculates TRUE probability by removing FanDuel's vig, then adjusts
+for PrizePicks line differences to show YOUR actual win rate.
 
 Mathematical Approach:
     1. Convert FanDuel Over/Under odds to implied probabilities
-    2. Adjust probability based on PP vs FD line difference
-    3. Return opportunities with ADJUSTED win rates
+    2. Remove vig: true_prob = implied_prob / (sum of both sides)
+    3. Adjust true probability based on PP vs FD line difference
+    4. Return opportunities with ADJUSTED, VIG-FREE win rates
     
 Example (NEW):
     FanDuel: LeBron 26.5 Points, Over -120, Under +100
@@ -237,14 +238,27 @@ class PropsAnalyzer:
 
     def _calculate_true_probability(self, over_odds, under_odds):
         """
-        Get implied probability without removing bookmaker vig.
-        
+        Convert FanDuel American odds to TRUE (vig-removed) probabilities.
+
+        Method: Additive normalization ("basic devig")
+            1. Convert each side's American odds to an implied probability
+            2. Sum both sides — the excess above 1.0 is the bookmaker's vig
+            3. Divide each side by that sum to get the fair, vig-free probability
+
+        Example:
+            Over  -120  →  120 / (120+100) = 54.55%
+            Under +100  →  100 / (100+100) = 50.00%
+            Market total = 104.55%  (vig = 4.55%)
+            True Over   = 54.55% / 104.55% = 52.17%
+            True Under  = 50.00% / 104.55% = 47.83%
+            (sum = 100% ✓)
+
         Args:
-            over_odds (int): American odds for Over (e.g., -120)
-            under_odds (int): American odds for Under (e.g., +100)
-            
+            over_odds (int):  American odds for Over  (e.g. -120)
+            under_odds (int): American odds for Under (e.g. +100)
+
         Returns:
-            tuple: (implied_over_prob, implied_under_prob)
+            tuple: (true_over_prob, true_under_prob) — both between 0 and 1, summing to 1
         """
         def odds_to_prob(odds):
             if odds < 0:
@@ -252,10 +266,15 @@ class PropsAnalyzer:
             else:
                 return 100 / (odds + 100)
 
-        prob_over = odds_to_prob(over_odds)
+        prob_over  = odds_to_prob(over_odds)
         prob_under = odds_to_prob(under_odds)
 
-        return prob_over, prob_under
+        # ✅ Devig: normalize so both sides sum to exactly 1.0
+        market_total  = prob_over + prob_under
+        true_over     = prob_over  / market_total
+        true_under    = prob_under / market_total
+
+        return true_over, true_under
 
     def _adjust_for_line_difference(self, true_over, true_under, line_diff, stat):
         """
