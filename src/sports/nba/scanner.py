@@ -1185,11 +1185,10 @@ def scout_player(df_history, models):
         print(f"\nSCOUTING REPORT: {name} ({actual_date})")
         print(f"Injury Impact: {missing_usage_today:.1f}% Missing Usage")
 
-        # Calculate injury adjustments for this player
-        pid_for_adj = matches.sort_values('GAME_DATE').iloc[-1]['PLAYER_ID']
-        inj_adj = _calculate_injury_adjustments(df_history, team_id, pid_for_adj)
-        if inj_adj:
-            print(f"Injury Boost: adjustments for {len(inj_adj)} stats")
+        # NOTE: Manual injury redistribution removed — matches scan_all behaviour.
+        # MISSING_USAGE is fed into XGBoost as a feature and the model handles the
+        # boost internally.  Adding a second manual bump caused double-counting.
+        inj_adj = {}
 
         # Show FanDuel cache age
         print(f"FanDuel odds: cached {fd_cache_age_str}")
@@ -1224,9 +1223,7 @@ def scout_player(df_history, models):
                 tier_text     = MODEL_QUALITY.get(target, {}).get('tier', 'UNKNOWN')
                 model_features = [f for f in models[target].feature_names_in_]
                 valid_input   = input_row.reindex(columns=model_features, fill_value=0)
-                base_pred     = float(models[target].predict(valid_input)[0])
-                adj           = inj_adj.get(target, 0)
-                pred          = base_pred + adj
+                pred          = float(models[target].predict(valid_input)[0])
 
                 # Get PP line with type info
                 pp_info = player_pp.get(target)
