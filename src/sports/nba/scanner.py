@@ -738,58 +738,78 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
         # ✅ DEDUPLICATE: Remove duplicate player+stat+line combinations
         seen = set()
         deduped_bets = []
-        
+
         for bet in best_bets:
-            # Create unique key: player + stat + line
             key = (bet['NAME'], bet['TARGET'], bet['PP'])
             if key not in seen:
                 seen.add(key)
                 deduped_bets.append(bet)
-        
-        print(f"   Removed {len(best_bets) - len(deduped_bets)} duplicate entries")
-        
-        # Sort purely by mathematical edge
-        def _sort_key(b):
-            return -abs(b['PCT_EDGE'])
-            
-        deduped_bets.sort(key=_sort_key)
-        
-        # Take top 30 with market diversity — ensure every stat type gets exposure
-        def _diverse_top(bets, n=30):
-            """Pick best bet per market first, then fill to n."""
-            if len(bets) <= n:
-                return bets[:n]
-            by_market = {}
-            for b in bets:
-                t = b['TARGET']
-                if t not in by_market or abs(b['PCT_EDGE']) > abs(by_market[t]['PCT_EDGE']):
-                    by_market[t] = b
-            result = list(by_market.values())
-            seen = {(x['NAME'], x['TARGET'], x['PP']) for x in result}
-            for b in bets:
-                key = (b['NAME'], b['TARGET'], b['PP'])
-                if key not in seen and len(result) < n:
-                    result.append(b)
-                    seen.add(key)
-            result.sort(key=_sort_key)
-            return result[:n]
 
-        top_plays = _diverse_top(deduped_bets, n=30)
-        
-        # Table format — consistent column widths, spacing, separator
-        sep = "-" * 106
-        
-        print("\n  🚀 TOP 30 PLAYS BY AI EDGE % 🚀")
-        print()
-        print(f" {'TIER':<10} | {'PLAYER':<22} | {'STAT':<10} | {'AI vs PP':^17} | {'EDGE %':>8} | {'O/U':^5} | {'L10 HIT':>7} | {'CONF':>5}")
-        print(sep)
-        for bet in top_plays:
-            direction = "OVER" if bet['EDGE'] > 0 else "UNDER"
-            l10_pct = f"{bet['L10_HIT']*100:.0f}%"
-            edge_str = f"{bet['PCT_EDGE']:.1f}%"
-            target_str = bet['TARGET'].replace('_1H', ' 1H').replace('FPTS', 'FSCR')
-            print(f" {bet['TIER']:<10} | {bet['NAME'][:22]:<22} | {target_str:<10} | "
-                  f"{bet['AI']:>7.2f} vs {bet['PP']:>6.2f} | {edge_str:>8} | {direction:^5} | {l10_pct:>7} | {bet['CONFIDENCE']:>5.1f}")
+        print(f"   Removed {len(best_bets) - len(deduped_bets)} duplicate entries")
+
+        # ── Per-market display ────────────────────────────────────────────────
+        PLAYS_PER_SIDE = 5   # ← change to show more/fewer per direction
+
+        # Group all bets by market (TARGET)
+        from collections import defaultdict
+        by_market = defaultdict(lambda: {'OVER': [], 'UNDER': []})
+        for bet in deduped_bets:
+            direction = 'OVER' if bet['EDGE'] > 0 else 'UNDER'
+            by_market[bet['TARGET']][direction].append(bet)
+
+        # Sort within each direction by absolute edge (best first)
+        for mkt in by_market:
+            by_market[mkt]['OVER'].sort(key=lambda b: -b['PCT_EDGE'])
+            by_market[mkt]['UNDER'].sort(key=lambda b: b['PCT_EDGE'])  # most negative first
+
+        # Determine print order: markets sorted by combined top-edge strength
+        def _market_strength(mkt):
+            bets = by_market[mkt]
+            top_over  = bets['OVER'][0]['PCT_EDGE']  if bets['OVER']  else 0
+            top_under = abs(bets['UNDER'][0]['PCT_EDGE']) if bets['UNDER'] else 0
+            return -(top_over + top_under)
+
+        ordered_markets = sorted(by_market.keys(), key=_market_strength)
+
+        col_w = 108
+        sep   = "─" * col_w
+        hdr   = f" {'TIER':<10} | {'PLAYER':<22} | {'STAT':<10} | {'AI vs PP':^17} | {'EDGE %':>8} | {'O/U':^5} | {'L10 HIT':>7} | {'CONF':>5}"
+
+        total_shown = 0
+        print(f"\n  📊 BEST PLAYS BY MARKET  (top {PLAYS_PER_SIDE} OVERs + {PLAYS_PER_SIDE} UNDERs each)\n")
+
+        for mkt in ordered_markets:
+            mkt_label = mkt.replace('_1H', ' 1H').replace('FPTS', 'FSCR')
+            overs  = by_market[mkt]['OVER'][:PLAYS_PER_SIDE]
+            unders = by_market[mkt]['UNDER'][:PLAYS_PER_SIDE]
+
+            if not overs and not unders:
+                continue
+
+            print(f"  ══ {mkt_label} ══")
+            print(hdr)
+            print(sep)
+
+            for bet in overs:
+                l10_pct   = f"{bet['L10_HIT']*100:.0f}%"
+                edge_str  = f"{bet['PCT_EDGE']:.1f}%"
+                target_str = bet['TARGET'].replace('_1H', ' 1H').replace('FPTS', 'FSCR')
+                print(f" {bet['TIER']:<10} | {bet['NAME'][:22]:<22} | {target_str:<10} | "
+                      f"{bet['AI']:>7.2f} vs {bet['PP']:>6.2f} | {edge_str:>8} | {'OVER':^5} | {l10_pct:>7} | {bet['CONFIDENCE']:>5.1f}")
+                total_shown += 1
+
+            if overs and unders:
+                print(f" {'':10}   {'─── UNDERs ───':^22}")
+
+            for bet in unders:
+                l10_pct   = f"{(1 - bet['L10_HIT'])*100:.0f}%"   # miss rate = under hit rate
+                edge_str  = f"{bet['PCT_EDGE']:.1f}%"
+                target_str = bet['TARGET'].replace('_1H', ' 1H').replace('FPTS', 'FSCR')
+                print(f" {bet['TIER']:<10} | {bet['NAME'][:22]:<22} | {target_str:<10} | "
+                      f"{bet['AI']:>7.2f} vs {bet['PP']:>6.2f} | {edge_str:>8} | {'UNDER':^5} | {l10_pct:>7} | {bet['CONFIDENCE']:>5.1f}")
+                total_shown += 1
+
+            print()
 
         # Determine save filename based on actual date used
         if actual_date:
