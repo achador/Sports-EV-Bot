@@ -622,14 +622,11 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
             
             if not features_ok: continue
 
-            # --- Injury redistribution adjustments ---
-            # Pass the cache to avoid re-filtering inside
-            inj_adj = _calculate_injury_adjustments_fast(
-                latest_rows_map, team_players, pid
-            )
-            for stat, adj_val in inj_adj.items():
-                if stat in player_predictions:
-                    player_predictions[stat] += adj_val
+            # NOTE: Injury redistribution (Layer 2) intentionally removed.
+            # MISSING_USAGE is fed into XGBoost as a feature (Layer 1), and the
+            # model already learned the injury boost from historical training data.
+            # Adding a second manual bump on top caused double-counting and
+            # inflated projections when teammates were out.
 
             # Apply correlation constraints
             if 'PRA' in player_predictions:
