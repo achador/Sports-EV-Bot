@@ -50,40 +50,41 @@ def refresh_injuries():
 
 TARGETS = ACTIVE_TARGETS
 
+# --- FEATURES LIST ---
+# MUST stay in sync with train.py get_features_for_target().
+# The models use L5, L10, L20, Season, L5_Median, L10_Median per stat.
+# Missing features get fill_value=0 at inference → corrupted predictions.
+
+_BASE_STATS = ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL', 'BLK', 'TOV',
+               'FGM', 'FGA', 'FTM', 'FTA', 'MIN', 'GAME_SCORE', 'USAGE_RATE', 'FPTS']
+_COMBO_STATS = ['PRA', 'PR', 'PA', 'RA', 'SB']
+_1H_STATS = ['PTS_1H', 'MIN_1H', 'FPTS_1H', 'PRA_1H']
+
 FEATURES = [
-    'PTS_L5', 'PTS_L20', 'PTS_Season',
-    'REB_L5', 'REB_L20', 'REB_Season',
-    'AST_L5', 'AST_L20', 'AST_Season',
-    'FG3M_L5', 'FG3M_L20', 'FG3M_Season',
-    'FG3A_L5', 'FG3A_L20', 'FG3A_Season',
-    'STL_L5', 'STL_L20', 'STL_Season',
-    'BLK_L5', 'BLK_L20', 'BLK_Season',
-    'TOV_L5', 'TOV_L20', 'TOV_Season',
-    'FGM_L5', 'FGM_L20', 'FGM_Season',
-    'FTM_L5', 'FTM_L20', 'FTM_Season',
-    'MIN_L5', 'MIN_L20', 'MIN_Season',
-    'GAME_SCORE_L5', 'GAME_SCORE_L20', 'GAME_SCORE_Season',
-    'USAGE_RATE_L5', 'USAGE_RATE_L20', 'USAGE_RATE_Season',
+    # Core context features (used by every model)
     'MISSING_USAGE',
     'TS_PCT', 'DAYS_REST', 'IS_HOME',
     'GAMES_7D', 'IS_4_IN_6', 'IS_B2B', 'IS_FRESH',
     'PACE_ROLLING', 'FGA_PER_MIN', 'TOV_PER_USAGE',
     'USAGE_VACUUM', 'STAR_COUNT',
-    # Location splits + opponent context (synced with train.py)
+    # Location splits + opponent context
     'PTS_LOC_MEAN', 'REB_LOC_MEAN', 'AST_LOC_MEAN', 'FG3M_LOC_MEAN', 'PRA_LOC_MEAN',
     'OPP_WIN_PCT', 'IS_VS_ELITE_TEAM'
 ]
 
-for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
-    FEATURES.extend([f'{combo}_L5', f'{combo}_L20', f'{combo}_Season'])
+# Rolling variants for ALL stats (L5, L10, L20, Season, L5_Median, L10_Median)
+for stat in _BASE_STATS + _COMBO_STATS + _1H_STATS:
+    for suffix in ['_Season', '_L5', '_L10', '_L20', '_L5_Median', '_L10_Median']:
+        FEATURES.append(f'{stat}{suffix}')
 
+# Defensive matchup features (DvP)
 for stat in ['PTS', 'REB', 'AST', 'FG3M', 'FGA', 'BLK', 'STL', 'TOV', 'FGM', 'FTM', 'FTA']:
     FEATURES.append(f'OPP_{stat}_ALLOWED')
-    FEATURES.append(f'OPP_{stat}_ALLOWED_DIFF')  # DvP Diff (synced with train.py)
+    FEATURES.append(f'OPP_{stat}_ALLOWED_DIFF')
 
-for combo in ['PRA', 'PR', 'PA', 'RA', 'SB']:
+for combo in _COMBO_STATS:
     FEATURES.append(f'OPP_{combo}_ALLOWED')
-    FEATURES.append(f'OPP_{combo}_ALLOWED_DIFF')  # DvP Diff (synced with train.py)
+    FEATURES.append(f'OPP_{combo}_ALLOWED_DIFF')
 
 
 def normalize_name(name):
@@ -131,6 +132,7 @@ def prepare_features(player_row, is_home=0, days_rest=2, missing_usage=0):
     features['IS_HOME']       = 1 if is_home else 0
     features['DAYS_REST']     = days_rest
     features['IS_B2B']        = 1 if days_rest == 1 else 0
+    features['IS_FRESH']      = 1 if days_rest >= 3 else 0
     features['MISSING_USAGE'] = missing_usage
     return pd.DataFrame([features])
 
@@ -142,6 +144,46 @@ def get_betting_indicator(proj, line):
     else:        return f"🔴 UNDER ({diff:.2f})"
 
 
+def _derive_stat_column(player_logs, stat):
+    """
+    Derive a stat column if it doesn't exist in the DataFrame.
+    Handles full-game combos, FPTS, and 1H stats.
+    Returns the column name if derivable, else None.
+    """
+    if stat in player_logs.columns and player_logs[stat].notna().any():
+        return stat  # Already exists with data
+
+    # Full-game combo stats
+    if stat == 'PRA' and all(c in player_logs.columns for c in ['PTS', 'REB', 'AST']):
+        player_logs['PRA'] = player_logs['PTS'] + player_logs['REB'] + player_logs['AST']
+    elif stat == 'PR' and all(c in player_logs.columns for c in ['PTS', 'REB']):
+        player_logs['PR'] = player_logs['PTS'] + player_logs['REB']
+    elif stat == 'PA' and all(c in player_logs.columns for c in ['PTS', 'AST']):
+        player_logs['PA'] = player_logs['PTS'] + player_logs['AST']
+    elif stat == 'RA' and all(c in player_logs.columns for c in ['REB', 'AST']):
+        player_logs['RA'] = player_logs['REB'] + player_logs['AST']
+    elif stat == 'SB' and all(c in player_logs.columns for c in ['STL', 'BLK']):
+        player_logs['SB'] = player_logs['STL'] + player_logs['BLK']
+
+    # Fantasy Score (PrizePicks formula)
+    elif stat == 'FPTS' and all(c in player_logs.columns for c in ['PTS', 'REB', 'AST', 'BLK', 'STL', 'TOV']):
+        player_logs['FPTS'] = (player_logs['PTS'] * 1 + player_logs['REB'] * 1.2
+                               + player_logs['AST'] * 1.5 + player_logs['BLK'] * 3
+                               + player_logs['STL'] * 3 - player_logs['TOV'])
+
+    # 1H combo / derived stats
+    elif stat == 'PRA_1H' and all(c in player_logs.columns for c in ['PTS_1H', 'REB_1H', 'AST_1H']):
+        player_logs['PRA_1H'] = player_logs['PTS_1H'] + player_logs['REB_1H'] + player_logs['AST_1H']
+    elif stat == 'FPTS_1H' and all(c in player_logs.columns for c in ['PTS_1H', 'REB_1H', 'AST_1H', 'BLK_1H', 'STL_1H', 'TOV_1H']):
+        player_logs['FPTS_1H'] = (player_logs['PTS_1H'] * 1 + player_logs['REB_1H'] * 1.2
+                                  + player_logs['AST_1H'] * 1.5 + player_logs['BLK_1H'] * 3
+                                  + player_logs['STL_1H'] * 3 - player_logs['TOV_1H'])
+    else:
+        return None
+
+    return stat
+
+
 def calculate_hit_rates(df_history, player_id, stat, line):
     """
     Calculate L5, L10, L20 hit rates against a specific line for a player.
@@ -149,44 +191,202 @@ def calculate_hit_rates(df_history, player_id, stat, line):
     """
     if line is None or line <= 0:
         return 0.0, 0.0, 0.0
-        
+
     # Get player's history sorted by date
-    player_logs = df_history[df_history['PLAYER_ID'] == player_id].sort_values('GAME_DATE')
-    
-    # We might not have the raw stat name if it's a combo stat (like PRA)
-    # Ensure combo stats are calculated if missing
-    if stat not in player_logs.columns:
-        if stat == 'PRA' and all(c in player_logs.columns for c in ['PTS', 'REB', 'AST']):
-            player_logs['PRA'] = player_logs['PTS'] + player_logs['REB'] + player_logs['AST']
-        elif stat == 'PR' and all(c in player_logs.columns for c in ['PTS', 'REB']):
-            player_logs['PR'] = player_logs['PTS'] + player_logs['REB']
-        elif stat == 'PA' and all(c in player_logs.columns for c in ['PTS', 'AST']):
-            player_logs['PA'] = player_logs['PTS'] + player_logs['AST']
-        elif stat == 'RA' and all(c in player_logs.columns for c in ['REB', 'AST']):
-            player_logs['RA'] = player_logs['REB'] + player_logs['AST']
-        elif stat == 'SB' and all(c in player_logs.columns for c in ['STL', 'BLK']):
-            player_logs['SB'] = player_logs['STL'] + player_logs['BLK']
-        else:
-            return 0.0, 0.0, 0.0
-            
+    player_logs = df_history[df_history['PLAYER_ID'] == player_id].sort_values('GAME_DATE').copy()
+
+    # Derive stat column if needed (handles FPTS, 1H stats, combos)
+    if _derive_stat_column(player_logs, stat) is None:
+        return 0.0, 0.0, 0.0
+
+    # Drop rows where the stat is NaN (e.g. auto-refreshed rows missing 1H data)
+    player_logs = player_logs.dropna(subset=[stat])
+
     recent_20 = player_logs.tail(20)
     if recent_20.empty:
         return 0.0, 0.0, 0.0
-        
+
     # How many times did they hit OVER the line?
     hits_20 = (recent_20[stat] > line).sum()
     hits_10 = (recent_20.tail(10)[stat] > line).sum()
     hits_5  = (recent_20.tail(5)[stat] > line).sum()
-    
+
     count_20 = len(recent_20)
     count_10 = len(recent_20.tail(10))
     count_5  = len(recent_20.tail(5))
-    
+
     l20_rate = hits_20 / count_20 if count_20 > 0 else 0.0
     l10_rate = hits_10 / count_10 if count_10 > 0 else 0.0
     l5_rate  = hits_5 / count_5 if count_5 > 0 else 0.0
-    
+
     return l5_rate, l10_rate, l20_rate
+
+
+def calculate_h2h_hit_rate(df_history, player_id, stat, line, opp_abbr):
+    """
+    Calculate hit rate against a specific opponent (head-to-head).
+    Limited to the last 2 seasons to keep data relevant.
+
+    Args:
+        df_history: Full game log DataFrame
+        player_id:  Player's NBA ID
+        stat:       Stat column name (e.g. 'PTS', 'PRA_1H', 'FPTS')
+        line:       PrizePicks line value
+        opp_abbr:   Opponent team abbreviation (e.g. 'BOS')
+
+    Returns:
+        (h2h_rate, h2h_count): over-rate and number of H2H games found
+    """
+    if line is None or line <= 0 or not opp_abbr:
+        return 0.0, 0
+
+    player_logs = df_history[df_history['PLAYER_ID'] == player_id].sort_values('GAME_DATE').copy()
+
+    if 'MATCHUP' not in player_logs.columns or player_logs.empty:
+        return 0.0, 0
+
+    # Limit to last 2 seasons — older matchups are irrelevant
+    cutoff = pd.to_datetime(datetime.now()) - timedelta(days=730)
+    player_logs = player_logs[player_logs['GAME_DATE'] >= cutoff]
+
+    # Derive stat column if needed
+    if _derive_stat_column(player_logs, stat) is None:
+        return 0.0, 0
+
+    # Filter to games vs this opponent
+    # MATCHUP format: "LAL vs. NOP" (home) or "LAL @ NOP" (away)
+    opp_upper = str(opp_abbr).upper() if opp_abbr else ''
+    h2h_mask = player_logs['MATCHUP'].str.contains(opp_upper, case=False, na=False)
+    h2h_logs = player_logs.loc[h2h_mask].dropna(subset=[stat])
+
+    if h2h_logs.empty:
+        return 0.0, 0
+
+    count = len(h2h_logs)
+    hits = (h2h_logs[stat] > line).sum()
+    rate = hits / count if count > 0 else 0.0
+
+    return rate, count
+
+
+def analyze_player_availability(df_history, player_id, scan_date_str):
+    """
+    Dynamically analyze a player's recent game log to detect:
+    - Extended absence (missed recent games)
+    - Minute restriction (ramping back up after injury)
+    - Recent return from multi-game absence
+    
+    Returns dict with:
+        penalty      (float): quality score penalty to apply (0 to -35)
+        scale_factor (float): projection multiplier (0.0 to 1.0, lower = more reduction)
+        flag         (str):   display flag ('⚠INJ', '⚠MIN', '⚠RTN', or '')
+        reason       (str):   human-readable reason
+    """
+    result = {'penalty': 0.0, 'scale_factor': 1.0, 'flag': '', 'reason': ''}
+    
+    player_logs = df_history[df_history['PLAYER_ID'] == player_id].sort_values('GAME_DATE')
+    if len(player_logs) < 3:
+        return result  # Not enough history to analyze
+    
+    scan_date = pd.to_datetime(scan_date_str) if scan_date_str else pd.to_datetime(datetime.now().strftime('%Y-%m-%d'))
+    
+    # --- 1. Days since last game ---
+    last_game_date = player_logs['GAME_DATE'].iloc[-1]
+    days_since_last = (scan_date - last_game_date).days
+    
+    # --- 2. Detect missed games (compare player games vs expected schedule) ---
+    # NBA teams play ~3.5 games per week. If a player has big gaps between games,
+    # they likely missed games due to injury.
+    recent_dates = player_logs['GAME_DATE'].tail(10)
+    if len(recent_dates) >= 3:
+        game_gaps = recent_dates.diff().dt.days.dropna()
+        avg_gap = game_gaps.mean()
+        max_recent_gap = game_gaps.max()
+    else:
+        avg_gap = 2.5
+        max_recent_gap = days_since_last
+    
+    # --- 3. Minute restriction detection ---
+    # Compare last 3 games' minutes to season average
+    if 'MIN' in player_logs.columns:
+        season_min_avg = player_logs['MIN'].mean()
+        last_3_mins = player_logs['MIN'].tail(3)
+        last_3_avg = last_3_mins.mean()
+        last_game_min = player_logs['MIN'].iloc[-1]
+        
+        # Minute ratio: how do recent minutes compare to season?
+        min_ratio = last_3_avg / season_min_avg if season_min_avg > 5 else 1.0
+        last_min_ratio = last_game_min / season_min_avg if season_min_avg > 5 else 1.0
+        
+        # Check for ramp-up pattern: minutes increasing game-over-game
+        is_ramping = False
+        if len(last_3_mins) == 3:
+            mins_list = last_3_mins.tolist()
+            is_ramping = mins_list[0] < mins_list[1] < mins_list[2] and min_ratio < 0.85
+    else:
+        min_ratio = 1.0
+        last_min_ratio = 1.0
+        is_ramping = False
+        season_min_avg = 0
+    
+    # --- 4. Apply penalties based on dynamic analysis ---
+    
+    # Extended absence: hasn't played in 10+ days
+    if days_since_last >= 10:
+        result['penalty'] = -30.0
+        result['scale_factor'] = 0.70  # Expect ~30% production loss from rust + minutes
+        result['flag'] = '⚠INJ'
+        result['reason'] = f'Out {days_since_last}d — extended absence'
+    
+    # Moderate absence: 7-9 days
+    elif days_since_last >= 7:
+        result['penalty'] = -20.0
+        result['scale_factor'] = 0.80  # Expect ~20% production loss
+        result['flag'] = '⚠INJ'
+        result['reason'] = f'Out {days_since_last}d — recent absence'
+    
+    # Recent multi-game absence detected via large gap in schedule
+    elif max_recent_gap >= 7 and days_since_last < 7:
+        # Player had a long gap recently but has returned
+        games_back = len(player_logs[player_logs['GAME_DATE'] > (last_game_date - timedelta(days=max_recent_gap))])
+        if games_back <= 3:
+            result['penalty'] = -15.0
+            # Scale based on how many games back: 1 game = more rust, 3 games = almost normal
+            result['scale_factor'] = 0.75 + (games_back * 0.05)  # 0.80, 0.85, 0.90
+            result['flag'] = '⚠RTN'
+            result['reason'] = f'Just returned — {games_back} games back after {max_recent_gap}d gap'
+    
+    # Minute restriction: recent minutes well below season average
+    if last_min_ratio < 0.65 and season_min_avg > 10:
+        # Severe minute restriction - scale production to match minutes
+        extra_penalty = -20.0 if not result['flag'] else -10.0
+        result['penalty'] += extra_penalty
+        # Production scales with minutes but slightly worse (rust/conditioning)
+        result['scale_factor'] = min(result['scale_factor'], last_min_ratio * 0.90)
+        if not result['flag']:
+            result['flag'] = '⚠MIN'
+            result['reason'] = f'Min restriction: {last_game_min:.0f}min vs {season_min_avg:.0f}avg'
+        else:
+            result['reason'] += f' + min restricted ({last_game_min:.0f}/{season_min_avg:.0f})'
+    
+    elif min_ratio < 0.75 and season_min_avg > 10 and not result['flag']:
+        # Moderate minute restriction (L3 average below 75% of season)
+        result['penalty'] = -12.0
+        result['scale_factor'] = min(result['scale_factor'], min_ratio * 0.95)
+        result['flag'] = '⚠MIN'
+        result['reason'] = f'Reduced mins: L3 avg {last_3_avg:.0f} vs {season_min_avg:.0f} season'
+    
+    # Ramp-up pattern: minutes increasing but still below season avg
+    elif is_ramping and not result['flag']:
+        result['penalty'] = -10.0
+        result['scale_factor'] = min(result['scale_factor'], min_ratio)
+        result['flag'] = '⚠RTN'
+        result['reason'] = f'Ramping up: {mins_list[0]:.0f}→{mins_list[1]:.0f}→{mins_list[2]:.0f}min (avg {season_min_avg:.0f})'
+    
+    # Clamp scale_factor
+    result['scale_factor'] = max(0.50, min(1.0, result['scale_factor']))
+    
+    return result
 
 
 def calculate_confidence_score(edge_pct, l10_hit, opponent_win_pct=None, is_role_expansion=False):
@@ -227,6 +427,220 @@ def load_data():
     df.columns = [c.strip() for c in df.columns]
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
     return df
+
+
+def auto_refresh_data(df_history):
+    """
+    Fetch recent game logs from NBA API and merge into df_history.
+    On success, saves updated data to disk so future runs skip the API call.
+    
+    Returns: updated df_history with new rows merged in.
+    """
+    from nba_api.stats.endpoints import playergamelogs
+
+    latest_date = df_history['GAME_DATE'].max()
+    today = pd.to_datetime(datetime.now().strftime('%Y-%m-%d'))
+    days_stale = (today - latest_date).days
+
+    if days_stale <= 1:
+        print(f"   ✅ Data is fresh (last game: {latest_date.date()})")
+        return df_history
+
+    print(f"   ⚠️  Data is {days_stale} days stale (last: {latest_date.date()}, today: {today.date()})")
+    print(f"   Fetching recent game logs from NBA API...")
+
+    # Retry up to 3 times with increasing timeout
+    api_df = None
+    for attempt in range(3):
+        try:
+            timeout = 60 + attempt * 30  # 60, 90, 120
+            if attempt > 0:
+                print(f"   Retry {attempt + 1}/3 (timeout={timeout}s)...")
+                time.sleep(3)
+            logs = playergamelogs.PlayerGameLogs(
+                season_nullable='2025-26',
+                league_id_nullable='00',
+                timeout=timeout
+            )
+            api_df = logs.get_data_frames()[0]
+            break  # Success
+        except Exception as e:
+            if attempt == 2:
+                print(f"   ⚠️  Auto-refresh failed ({e}), using existing dataset")
+                return df_history
+
+    if api_df is None or api_df.empty:
+        print("   ⚠️  No new data from API, using existing dataset")
+        return df_history
+
+    # --- Fetch 1st Half box scores ---
+    api_1h_df = None
+    print(f"   Fetching 1st Half box scores...")
+    for attempt in range(3):
+        try:
+            timeout = 60 + attempt * 30
+            if attempt > 0:
+                print(f"   Retry {attempt + 1}/3 for 1H (timeout={timeout}s)...")
+                time.sleep(3)
+            logs_1h = playergamelogs.PlayerGameLogs(
+                season_nullable='2025-26',
+                league_id_nullable='00',
+                game_segment_nullable='First Half',
+                timeout=timeout
+            )
+            api_1h_df = logs_1h.get_data_frames()[0]
+            break
+        except Exception as e:
+            if attempt == 2:
+                print(f"   ⚠️  1H fetch failed ({e}), 1H stats will use last known values")
+
+    try:
+        # Parse dates and filter to only new rows
+        api_df['GAME_DATE'] = pd.to_datetime(api_df['GAME_DATE'])
+        new_rows = api_df[api_df['GAME_DATE'] > latest_date].copy()
+
+        if new_rows.empty:
+            print(f"   ✅ No new games since {latest_date.date()}")
+            return df_history
+
+        print(f"   📥 Found {len(new_rows)} new game rows ({new_rows['GAME_DATE'].min().date()} → {new_rows['GAME_DATE'].max().date()})")
+
+        # Standardize column names to match training dataset
+        # The API uses SEASON_YEAR, training dataset uses SEASON_ID
+        if 'SEASON_YEAR' in new_rows.columns and 'SEASON_ID' not in new_rows.columns:
+            new_rows['SEASON_ID'] = new_rows['SEASON_YEAR']
+        if 'SEASON_ID' not in new_rows.columns:
+            new_rows['SEASON_ID'] = '2025-26'
+
+        # Keep only columns that exist in training dataset (raw stats)
+        raw_stat_cols = ['PLAYER_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_ABBREVIATION',
+                         'GAME_ID', 'GAME_DATE',
+                         'MATCHUP', 'WL', 'SEASON_ID',
+                         'MIN', 'PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL', 'BLK', 'TOV',
+                         'FGM', 'FGA', 'FTM', 'FTA', 'OREB', 'DREB', 'PF',
+                         'NBA_FANTASY_PTS', 'PLUS_MINUS']
+        
+        # Also keep SEASON_YEAR if present in the training dataset
+        if 'SEASON_YEAR' in df_history.columns:
+            raw_stat_cols.append('SEASON_YEAR')
+
+        available_cols = [c for c in raw_stat_cols if c in new_rows.columns]
+        new_rows = new_rows[available_cols].copy()
+
+        # Add combo stats
+        if all(c in new_rows.columns for c in ['PTS', 'REB', 'AST']):
+            new_rows['PRA'] = new_rows['PTS'] + new_rows['REB'] + new_rows['AST']
+            new_rows['PR'] = new_rows['PTS'] + new_rows['REB']
+            new_rows['PA'] = new_rows['PTS'] + new_rows['AST']
+            new_rows['RA'] = new_rows['REB'] + new_rows['AST']
+        if all(c in new_rows.columns for c in ['STL', 'BLK']):
+            new_rows['SB'] = new_rows['STL'] + new_rows['BLK']
+        if 'NBA_FANTASY_PTS' in new_rows.columns:
+            new_rows['FPTS'] = new_rows['NBA_FANTASY_PTS']
+
+        # --- Merge 1H data into new rows ---
+        if api_1h_df is not None and not api_1h_df.empty:
+            api_1h_df['GAME_DATE'] = pd.to_datetime(api_1h_df['GAME_DATE'])
+            new_1h = api_1h_df[api_1h_df['GAME_DATE'] > latest_date].copy()
+            if not new_1h.empty:
+                rename_cols = {
+                    'MIN': 'MIN_1H', 'PTS': 'PTS_1H', 'REB': 'REB_1H', 'AST': 'AST_1H',
+                    'FG3M': 'FG3M_1H', 'STL': 'STL_1H', 'BLK': 'BLK_1H', 'TOV': 'TOV_1H',
+                    'FGM': 'FGM_1H', 'FGA': 'FGA_1H', 'FTM': 'FTM_1H', 'FTA': 'FTA_1H',
+                    'NBA_FANTASY_PTS': 'NBA_FANTASY_PTS_1H', 'FG3A': 'FG3A_1H'
+                }
+                new_1h.rename(columns=rename_cols, inplace=True)
+                cols_to_keep = ['PLAYER_ID', 'GAME_ID'] + list(rename_cols.values())
+                new_1h = new_1h[[c for c in cols_to_keep if c in new_1h.columns]]
+                new_rows = new_rows.merge(new_1h, on=['PLAYER_ID', 'GAME_ID'], how='left')
+                # Compute 1H combo stats
+                if all(c in new_rows.columns for c in ['PTS_1H', 'REB_1H', 'AST_1H']):
+                    new_rows['PRA_1H'] = new_rows['PTS_1H'] + new_rows['REB_1H'] + new_rows['AST_1H']
+                if all(c in new_rows.columns for c in ['PTS_1H', 'REB_1H', 'AST_1H', 'BLK_1H', 'STL_1H', 'TOV_1H']):
+                    new_rows['FPTS_1H'] = (new_rows['PTS_1H'] + new_rows['REB_1H'] * 1.2
+                                           + new_rows['AST_1H'] * 1.5 + new_rows['BLK_1H'] * 3
+                                           + new_rows['STL_1H'] * 3 - new_rows['TOV_1H'])
+                print(f"   📥 Merged {len(new_1h)} 1H box scores")
+
+        # Merge new rows into history (dedup by PLAYER_ID + GAME_ID)
+        combined = pd.concat([df_history, new_rows], ignore_index=True)
+        combined = combined.drop_duplicates(subset=['PLAYER_ID', 'GAME_ID'], keep='first')
+        combined = combined.sort_values(['PLAYER_ID', 'GAME_DATE']).reset_index(drop=True)
+
+        # Recompute rolling stats for all players who have new data
+        updated_pids = new_rows['PLAYER_ID'].unique()
+        print(f"   🔄 Recomputing rolling stats for {len(updated_pids)} players...")
+
+        base_stats = ['PTS', 'REB', 'AST', 'FG3M', 'FG3A', 'STL', 'BLK', 'TOV',
+                      'FGM', 'FGA', 'FTM', 'FTA', 'MIN', 'PRA', 'PR', 'PA', 'RA', 'SB', 'FPTS',
+                      'PTS_1H', 'REB_1H', 'AST_1H', 'FG3M_1H', 'STL_1H', 'BLK_1H', 'TOV_1H',
+                      'FGM_1H', 'FGA_1H', 'FTM_1H', 'FTA_1H', 'MIN_1H', 'PRA_1H', 'FPTS_1H',
+                      'NBA_FANTASY_PTS_1H', 'FG3A_1H']
+        # Only compute for stats that exist
+        base_stats = [s for s in base_stats if s in combined.columns]
+
+        for pid in updated_pids:
+            mask = combined['PLAYER_ID'] == pid
+            player_df = combined.loc[mask].sort_values('GAME_DATE')
+
+            for stat in base_stats:
+                if stat not in player_df.columns:
+                    continue
+                vals = player_df[stat]
+                combined.loc[mask, f'{stat}_L5'] = vals.rolling(5, min_periods=1).mean().values
+                combined.loc[mask, f'{stat}_L10'] = vals.rolling(10, min_periods=1).mean().values
+                combined.loc[mask, f'{stat}_L20'] = vals.rolling(20, min_periods=1).mean().values
+                combined.loc[mask, f'{stat}_Season'] = vals.expanding().mean().values
+                combined.loc[mask, f'{stat}_L5_Median'] = vals.rolling(5, min_periods=1).median().values
+                combined.loc[mask, f'{stat}_L10_Median'] = vals.rolling(10, min_periods=1).median().values
+
+            # Recompute GAME_SCORE if PTS and other stats are available
+            if all(c in player_df.columns for c in ['PTS', 'FGM', 'FGA', 'FTM', 'FTA', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'PF']):
+                gs = (player_df['PTS'] + 0.4 * player_df['FGM'] - 0.7 * player_df['FGA']
+                      - 0.4 * (player_df['FTA'] - player_df['FTM']) + 0.7 * player_df['OREB'].fillna(0)
+                      + 0.3 * player_df['DREB'].fillna(0) + player_df['STL']
+                      + 0.7 * player_df['AST'] + 0.7 * player_df['BLK']
+                      - 0.4 * player_df['PF'] - player_df['TOV'])
+                combined.loc[mask, 'GAME_SCORE'] = gs.values
+                combined.loc[mask, 'GAME_SCORE_L5'] = gs.rolling(5, min_periods=1).mean().values
+                combined.loc[mask, 'GAME_SCORE_L10'] = gs.rolling(10, min_periods=1).mean().values
+                combined.loc[mask, 'GAME_SCORE_Season'] = gs.expanding().mean().values
+
+            # Recompute USAGE_RATE approximation
+            if all(c in player_df.columns for c in ['FGA', 'FTA', 'TOV', 'MIN']):
+                mins = player_df['MIN'].replace(0, 1)
+                usage = ((player_df['FGA'] + 0.44 * player_df['FTA'] + player_df['TOV']) / mins * 48 / 5)
+                usage = usage.clip(0, 50)
+                combined.loc[mask, 'USAGE_RATE'] = usage.values
+                combined.loc[mask, 'USAGE_RATE_L5'] = usage.rolling(5, min_periods=1).mean().values
+                combined.loc[mask, 'USAGE_RATE_L10'] = usage.rolling(10, min_periods=1).mean().values
+                combined.loc[mask, 'USAGE_RATE_Season'] = usage.expanding().mean().values
+
+        new_latest = combined['GAME_DATE'].max()
+        print(f"   ✅ Data refreshed: now {len(combined):,} rows up to {new_latest.date()}")
+
+        # If 1H data wasn't fetched, forward-fill so latest rows inherit last known values
+        if api_1h_df is None or api_1h_df.empty:
+            _1h_rolling_cols = [c for c in combined.columns
+                               if ('_1H' in c and any(c.endswith(s) for s in
+                                   ['_L5', '_L10', '_L20', '_Season', '_L5_Median', '_L10_Median']))]
+            if _1h_rolling_cols:
+                for pid in updated_pids:
+                    mask = combined['PLAYER_ID'] == pid
+                    combined.loc[mask, _1h_rolling_cols] = (
+                        combined.loc[mask, _1h_rolling_cols].ffill()
+                    )
+                print(f"   ↪ Forward-filled {len(_1h_rolling_cols)} 1H rolling columns (1H API unavailable)")
+
+        # Persist to disk so next run doesn't re-fetch
+        combined.to_csv(DATA_FILE, index=False)
+        print(f"   💾 Saved to {os.path.basename(DATA_FILE)}")
+
+        return combined
+
+    except Exception as e:
+        print(f"   ⚠️  Auto-refresh failed ({e}), using existing dataset")
+        return df_history
 
 
 # ---------------------------------------------------------------------------
@@ -565,12 +979,55 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
 
     norm_lines = {normalize_name(k): v for k, v in live_lines.items()}
 
+    # --- Load FanDuel cache to cross-reference lines ---
+    import json, math as _math
+    fd_cache_file = os.path.join(BASE_DIR, 'fanduel_cache', 'fanduel_cache_nba.json')
+    fd_lines_by_player = {}  # {normalized_name: {stat_code: fd_line}}
+
+    _FD_TO_CODE = {
+        'Points': 'PTS', 'Rebounds': 'REB', 'Assists': 'AST',
+        '3-Pt Made': 'FG3M', 'Pts+Rebs+Asts': 'PRA', 'Pts+Rebs': 'PR',
+        'Pts+Asts': 'PA', 'Rebs+Asts': 'RA', 'Blks+Stls': 'SB',
+        'Blocks': 'BLK', 'Steals': 'STL', 'Turnovers': 'TOV',
+        'Field Goals Made': 'FGM', 'Free Throws Made': 'FTM',
+        'Free Throws Attempted': 'FTA', 'Field Goals Attempted': 'FGA',
+    }
+
+    if os.path.exists(fd_cache_file):
+        try:
+            with open(fd_cache_file, 'r') as f:
+                fd_raw = json.load(f)
+            for entry in fd_raw:
+                p_name = normalize_name(entry.get('Player', ''))
+                raw_stat = entry.get('Stat', '')
+                stat_code = _FD_TO_CODE.get(raw_stat, raw_stat)
+                line = entry.get('Line', 0)
+                if not p_name or not stat_code or not line:
+                    continue
+                if p_name not in fd_lines_by_player:
+                    fd_lines_by_player[p_name] = {}
+                fd_lines_by_player[p_name][stat_code] = line
+            print(f"   FanDuel lines loaded ({len(fd_lines_by_player)} players) for cross-reference")
+        except Exception:
+            print("   FanDuel cache not available — skipping line diff check")
+    else:
+        print("   No FanDuel cache — line diff check disabled")
+
     print("Building data cache & scanning markets...")
     # --- PRE-BUILD CACHE (O(N) once) ---
     latest_rows_map, team_rosters_map = build_data_cache(df_history)
 
+    # Build team_id → abbreviation lookup for H2H
+    team_id_to_abbr = {}
+    for pid, row in latest_rows_map.items():
+        tid = row.get('TEAM_ID')
+        abbr = row.get('TEAM_ABBREVIATION', '')
+        if tid and isinstance(abbr, str) and abbr:
+            team_id_to_abbr[tid] = abbr
+
     best_bets = []
     all_projections = []
+    avail_cache = {}  # Cache per-player availability analysis
 
     for team_id, info in todays_teams.items():
         # O(1) Lookup for roster
@@ -598,10 +1055,28 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
 
             if get_player_status(player_name) == 'OUT':
                 continue
-                
+
+            # Compute actual DAYS_REST from last game date
+            last_game_date = last_row.get('GAME_DATE')
+            if last_game_date and actual_date:
+                try:
+                    last_dt = pd.to_datetime(last_game_date)
+                    scan_dt = pd.to_datetime(actual_date)
+                    days_rest = max(1, (scan_dt - last_dt).days)
+                    days_rest = min(days_rest, 7)  # Cap at 7 like features.py
+                except Exception:
+                    days_rest = 2
+            else:
+                days_rest = 2
+
+            # Cache availability analysis per player (not per stat)
+            if pid not in avail_cache:
+                avail_cache[pid] = analyze_player_availability(df_history, pid, actual_date)
+
             input_row = prepare_features(
                 last_row,
                 is_home=info['is_home'],
+                days_rest=days_rest,
                 missing_usage=missing_usage_today
             )
 
@@ -622,42 +1097,42 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
             
             if not features_ok: continue
 
+            # Scale projections for injury-return / minute restrictions
+            # This affects ALL stats — a player on a minute restriction or
+            # returning from injury produces less across the board.
+            avail = avail_cache.get(pid, {'penalty': 0, 'scale_factor': 1.0, 'flag': '', 'reason': ''})
+            if avail['scale_factor'] < 1.0:
+                for tgt in player_predictions:
+                    player_predictions[tgt] *= avail['scale_factor']
+
             # NOTE: Injury redistribution (Layer 2) intentionally removed.
             # MISSING_USAGE is fed into XGBoost as a feature (Layer 1), and the
             # model already learned the injury boost from historical training data.
             # Adding a second manual bump on top caused double-counting and
             # inflated projections when teammates were out.
 
-            # Apply correlation constraints
+            # Apply correlation constraints (average model + components to avoid bias)
+            pts = player_predictions.get('PTS', 0)
+            reb = player_predictions.get('REB', 0)
+            ast = player_predictions.get('AST', 0)
+            stl = player_predictions.get('STL', 0)
+            blk = player_predictions.get('BLK', 0)
+
             if 'PRA' in player_predictions:
-                pts = player_predictions.get('PTS', 0)
-                reb = player_predictions.get('REB', 0)
-                ast = player_predictions.get('AST', 0)
-                player_predictions['PRA'] = max(player_predictions['PRA'], pts + reb + ast)
+                component_sum = pts + reb + ast
+                player_predictions['PRA'] = (player_predictions['PRA'] + component_sum) / 2
 
             if 'PR' in player_predictions:
-                player_predictions['PR'] = max(
-                    player_predictions['PR'],
-                    player_predictions.get('PTS', 0) + player_predictions.get('REB', 0)
-                )
+                player_predictions['PR'] = (player_predictions['PR'] + pts + reb) / 2
 
             if 'PA' in player_predictions:
-                player_predictions['PA'] = max(
-                    player_predictions['PA'],
-                    player_predictions.get('PTS', 0) + player_predictions.get('AST', 0)
-                )
+                player_predictions['PA'] = (player_predictions['PA'] + pts + ast) / 2
 
             if 'RA' in player_predictions:
-                player_predictions['RA'] = max(
-                    player_predictions['RA'],
-                    player_predictions.get('REB', 0) + player_predictions.get('AST', 0)
-                )
+                player_predictions['RA'] = (player_predictions['RA'] + reb + ast) / 2
 
             if 'SB' in player_predictions:
-                player_predictions['SB'] = max(
-                    player_predictions['SB'],
-                    player_predictions.get('STL', 0) + player_predictions.get('BLK', 0)
-                )
+                player_predictions['SB'] = (player_predictions['SB'] + stl + blk) / 2
 
             # Create recommendations
             for target, proj in player_predictions.items():
@@ -671,6 +1146,11 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 # Calculate Hit Rates
                 l5_hit, l10_hit, l20_hit = calculate_hit_rates(df_history, pid, target, line)
 
+                # Calculate H2H Hit Rate
+                opp_id = info.get('opp')
+                opp_abbr = team_id_to_abbr.get(opp_id, '')
+                h2h_hit, h2h_n = calculate_h2h_hit_rate(df_history, pid, target, line, opp_abbr)
+
                 all_projections.append({
                     'REC': rec,
                     'NAME': player_name,
@@ -680,7 +1160,9 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                     'EDGE': edge_val,
                     'L5_HIT': l5_hit,
                     'L10_HIT': l10_hit,
-                    'L20_HIT': l20_hit
+                    'L20_HIT': l20_hit,
+                    'H2H_HIT': h2h_hit,
+                    'H2H_N': h2h_n
                 })
 
                 # Calculate Confidence Score
@@ -709,113 +1191,225 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 conf_score = calculate_confidence_score(pct_edge_safe, line_diff_for_hit, opp_win_pct, is_role_expansion)
 
                 if line is not None and line > 0:
+                    # ── Line Diff validation ──
+                    # Skip plays where PP line differs from FD line by more than 0.5
+                    norm_name = normalize_name(player_name)
+                    fd_line = fd_lines_by_player.get(norm_name, {}).get(target)
+                    if fd_line is not None:
+                        line_diff = abs(line - fd_line)
+                        if line_diff > 0.5:
+                            continue  # Lines don't match — skip this play
+
                     edge = proj - line
                     pct_edge = (edge / safe_denominator) * 100
 
                     tier_info = MODEL_QUALITY.get(target, {})
+                    edge_threshold = tier_info.get('threshold', 2.5)
 
-                    best_bets.append({
-                        'REC': rec,
-                        'NAME': player_name,
-                        'TARGET': target,
-                        'AI': round(proj, 2),
-                        'PP': round(line, 2),
-                        'EDGE': edge,
-                        'PCT_EDGE': pct_edge,
-                        'TIER': tier_info.get('tier', 'UNKNOWN'),
-                        'THRESHOLD': tier_info.get('threshold', 2.5),
-                        'L5_HIT': l5_hit,
-                        'L10_HIT': l10_hit,
-                        'L20_HIT': l20_hit,
-                        'CONFIDENCE': conf_score
-                    })
+                    # Only surface plays with meaningful edge above model tier threshold
+                    if abs(pct_edge) >= edge_threshold:
+                        # Use cached availability analysis
+                        avail = avail_cache.get(pid, {'penalty': 0, 'flag': '', 'reason': ''})
 
-    # Display results
+                        best_bets.append({
+                            'REC': rec,
+                            'NAME': player_name,
+                            'TARGET': target,
+                            'AI': round(proj, 2),
+                            'PP': round(line, 2),
+                            'EDGE': edge,
+                            'PCT_EDGE': pct_edge,
+                            'TIER': tier_info.get('tier', 'UNKNOWN'),
+                            'THRESHOLD': edge_threshold,
+                            'L5_HIT': l5_hit,
+                            'L10_HIT': l10_hit,
+                            'L20_HIT': l20_hit,
+                            'H2H_HIT': h2h_hit,
+                            'H2H_N': h2h_n,
+                            'CONFIDENCE': conf_score,
+                            'AVAIL': avail
+                        })
+
+    # ══════════════════════════════════════════════════════════════════════
+    # PLAYS OF THE DAY — Quality-over-quantity display
+    # ══════════════════════════════════════════════════════════════════════
+
+    # Save full projections regardless of display filter
+    if actual_date:
+        save_path = os.path.join(PROJ_DIR, f"scan_{actual_date}.csv")
+    else:
+        save_path = TOMORROW_SCAN_FILE if is_tomorrow else TODAY_SCAN_FILE
+    if all_projections:
+        pd.DataFrame(all_projections).to_csv(save_path, index=False)
+
     if best_bets:
-        # ✅ DEDUPLICATE: Remove duplicate player+stat+line combinations
+        # ✅ DEDUPLICATE
         seen = set()
         deduped_bets = []
-
         for bet in best_bets:
             key = (bet['NAME'], bet['TARGET'], bet['PP'])
             if key not in seen:
                 seen.add(key)
                 deduped_bets.append(bet)
 
-        print(f"   Removed {len(best_bets) - len(deduped_bets)} duplicate entries")
+        # ── STRICT QUALITY FILTER ──────────────────────────────────────────
+        # Only keep plays from reliable model tiers
+        TRUSTED_TIERS = {'ELITE', 'STRONG', 'DECENT'}
+        MAX_PER_PLAYER = 2   # Diversity: don't load up on one player
 
-        # ── Per-market display ────────────────────────────────────────────────
-        PLAYS_PER_SIDE = 5   # ← change to show more/fewer per direction
-
-        # Group all bets by market (TARGET)
-        from collections import defaultdict
-        by_market = defaultdict(lambda: {'OVER': [], 'UNDER': []})
+        qualified = []
         for bet in deduped_bets:
-            direction = 'OVER' if bet['EDGE'] > 0 else 'UNDER'
-            by_market[bet['TARGET']][direction].append(bet)
-
-        # Sort within each direction by absolute edge (best first)
-        for mkt in by_market:
-            by_market[mkt]['OVER'].sort(key=lambda b: -b['PCT_EDGE'])
-            by_market[mkt]['UNDER'].sort(key=lambda b: b['PCT_EDGE'])  # most negative first
-
-        # Determine print order: markets sorted by combined top-edge strength
-        def _market_strength(mkt):
-            bets = by_market[mkt]
-            top_over  = bets['OVER'][0]['PCT_EDGE']  if bets['OVER']  else 0
-            top_under = abs(bets['UNDER'][0]['PCT_EDGE']) if bets['UNDER'] else 0
-            return -(top_over + top_under)
-
-        ordered_markets = sorted(by_market.keys(), key=_market_strength)
-
-        col_w = 108
-        sep   = "─" * col_w
-        hdr   = f" {'TIER':<10} | {'PLAYER':<22} | {'STAT':<10} | {'AI vs PP':^17} | {'EDGE %':>8} | {'O/U':^5} | {'L10 HIT':>7} | {'CONF':>5}"
-
-        total_shown = 0
-        print(f"\n  📊 BEST PLAYS BY MARKET  (top {PLAYS_PER_SIDE} OVERs + {PLAYS_PER_SIDE} UNDERs each)\n")
-
-        for mkt in ordered_markets:
-            mkt_label = mkt.replace('_1H', ' 1H').replace('FPTS', 'FSCR')
-            overs  = by_market[mkt]['OVER'][:PLAYS_PER_SIDE]
-            unders = by_market[mkt]['UNDER'][:PLAYS_PER_SIDE]
-
-            if not overs and not unders:
+            if bet['TIER'] not in TRUSTED_TIERS:
                 continue
 
-            print(f"  ══ {mkt_label} ══")
-            print(hdr)
-            print(sep)
+            is_over = bet['EDGE'] > 0
+            # L10 hit rate alignment: for overs, need high over-hit %;
+            # for unders, need high miss % (= 1 - L10_HIT)
+            aligned_hit = bet['L10_HIT'] if is_over else (1 - bet['L10_HIT'])
 
-            for bet in overs:
-                l10_pct   = f"{bet['L10_HIT']*100:.0f}%"
-                edge_str  = f"{bet['PCT_EDGE']:.1f}%"
+            # ── Composite Quality Score (0-100) ──
+            import math
+
+            # 1. Edge magnitude score (0-30 pts)
+            #    Logarithmic scaling: first 5% edge is most valuable,
+            #    diminishing returns after that. Caps at ~30 pts.
+            abs_edge = abs(bet['PCT_EDGE'])
+            edge_score = min(30.0, 30.0 * math.log1p(abs_edge) / math.log1p(15.0))
+
+            # Penalty for suspiciously large edges (>30% = likely model misfire)
+            if abs_edge > 30.0:
+                edge_score *= 0.7  # Discount — something is probably wrong
+
+            # 2. Hit rate alignment score (0-25 pts)
+            #    Scales across full range (0-100%), not gated
+            hit_score = aligned_hit * 25.0
+
+            # 3. Model tier score (0-20 pts)
+            tier_scores = {'ELITE': 20.0, 'STRONG': 14.0, 'DECENT': 8.0}
+            tier_score = tier_scores.get(bet['TIER'], 0)
+
+            # 4. Cross-window consistency bonus (0-15 pts)
+            #    If L5, L10, AND L20 all agree, that's a strong signal
+            l5_aligned  = bet['L5_HIT']  if is_over else (1 - bet['L5_HIT'])
+            l20_aligned = bet['L20_HIT'] if is_over else (1 - bet['L20_HIT'])
+
+            consistency_count = sum(1 for r in [l5_aligned, aligned_hit, l20_aligned] if r >= 0.60)
+            consistency_score = (consistency_count / 3.0) * 15.0
+
+            # 5. Edge realism bonus (0-10 pts)
+            #    Sweet spot is 3-15% edge — not too small, not suspiciously huge
+            if 3.0 <= abs_edge <= 15.0:
+                realism_bonus = 10.0
+            elif abs_edge < 3.0:
+                realism_bonus = (abs_edge / 3.0) * 5.0  # Small edge = less confident
+            else:
+                realism_bonus = max(0, 10.0 - (abs_edge - 15.0) * 0.3)  # Penalize extremes
+
+            quality = edge_score + hit_score + tier_score + consistency_score + realism_bonus
+
+            # 6. Dynamic injury-return / minute restriction penalty
+            avail = bet.get('AVAIL', {'penalty': 0, 'flag': '', 'reason': ''})
+            quality += avail['penalty']  # penalty is negative
+            inj_return_flag = avail['flag']
+
+            quality = max(0, quality)  # Floor at 0
+
+            # Assign letter grade (calibrated for full-range hit scoring)
+            if quality >= 92:
+                grade = 'A+'
+            elif quality >= 80:
+                grade = 'A '
+            elif quality >= 68:
+                grade = 'B+'
+            elif quality >= 55:
+                grade = 'B '
+            else:
+                grade = 'C '
+
+            bet['QUALITY'] = round(quality, 1)
+            bet['GRADE'] = grade
+            bet['ALIGNED_HIT'] = aligned_hit
+            bet['CONSISTENCY'] = consistency_count
+            bet['INJ_FLAG'] = inj_return_flag
+            qualified.append(bet)
+
+        # Sort by quality score (highest first)
+        qualified.sort(key=lambda b: -b['QUALITY'])
+
+        # ── PER-PLAYER CAP: max 2 plays per player for diversity ──
+        player_counts = {}
+        top_plays = []
+        MAX_PLAYS = 15
+        for bet in qualified:
+            name = bet['NAME']
+            player_counts[name] = player_counts.get(name, 0) + 1
+            if player_counts[name] <= MAX_PER_PLAYER:
+                top_plays.append(bet)
+            if len(top_plays) >= MAX_PLAYS:
+                break
+
+        # ── DISPLAY ────────────────────────────────────────────────────────
+        scan_date_str = actual_date or datetime.now().strftime('%Y-%m-%d')
+
+        if top_plays:
+            print(f"\n{'═' * 110}")
+            print(f"   🏆 PLAYS OF THE DAY — {scan_date_str}   ({len(top_plays)} plays from {len(deduped_bets)} scanned)")
+            print(f"{'═' * 110}")
+            print(f"   Filters: Trusted tiers · Edge above threshold · Max 2 per player")
+            print(f"{'─' * 110}")
+            print(f" {'#':>2} | {'GRD':^3} | {'PLAYER':<22} | {'STAT':<8} | {'PROJ':>6} {'LINE':>6} | {'EDGE':>7} | {'SIDE':<5} | {'L5':>4} {'L10':>4} {'L20':>4} | {'H2H':>7} | {'SCORE':>5} | {'FLAG':<4}")
+            print(f"{'─' * 110}")
+
+            for i, bet in enumerate(top_plays, 1):
+                is_over = bet['EDGE'] > 0
+                side_str = 'OVER' if is_over else 'UNDER'
+                edge_str = f"{bet['PCT_EDGE']:+.1f}%"
                 target_str = bet['TARGET'].replace('_1H', ' 1H').replace('FPTS', 'FSCR')
-                print(f" {bet['TIER']:<10} | {bet['NAME'][:22]:<22} | {target_str:<10} | "
-                      f"{bet['AI']:>7.2f} vs {bet['PP']:>6.2f} | {edge_str:>8} | {'OVER':^5} | {l10_pct:>7} | {bet['CONFIDENCE']:>5.1f}")
-                total_shown += 1
+                flag_str = bet.get('INJ_FLAG', '')
 
-            if overs and unders:
-                print(f" {'':10}   {'─── UNDERs ───':^22}")
+                # Show hit rates from the correct perspective
+                l5_str  = f"{bet['L5_HIT']*100:.0f}%" if is_over else f"{(1-bet['L5_HIT'])*100:.0f}%"
+                l10_str = f"{bet['ALIGNED_HIT']*100:.0f}%"
+                l20_str = f"{bet['L20_HIT']*100:.0f}%" if is_over else f"{(1-bet['L20_HIT'])*100:.0f}%"
 
-            for bet in unders:
-                l10_pct   = f"{(1 - bet['L10_HIT'])*100:.0f}%"   # miss rate = under hit rate
-                edge_str  = f"{bet['PCT_EDGE']:.1f}%"
-                target_str = bet['TARGET'].replace('_1H', ' 1H').replace('FPTS', 'FSCR')
-                print(f" {bet['TIER']:<10} | {bet['NAME'][:22]:<22} | {target_str:<10} | "
-                      f"{bet['AI']:>7.2f} vs {bet['PP']:>6.2f} | {edge_str:>8} | {'UNDER':^5} | {l10_pct:>7} | {bet['CONFIDENCE']:>5.1f}")
-                total_shown += 1
+                # H2H display: perspective-adjusted rate + sample size
+                h2h_n = bet.get('H2H_N', 0)
+                if h2h_n > 0:
+                    h2h_rate = bet['H2H_HIT'] if is_over else (1 - bet['H2H_HIT'])
+                    h2h_str = f"{h2h_rate*100:.0f}%({h2h_n})"
+                else:
+                    h2h_str = '  --  '
+
+                print(f" {i:>2} | {bet['GRADE']:^3} | {bet['NAME'][:22]:<22} | {target_str:<8} | "
+                      f"{bet['AI']:>6.1f} {bet['PP']:>6.1f} | {edge_str:>7} | {side_str:<5} | "
+                      f"{l5_str:>4} {l10_str:>4} {l20_str:>4} | {h2h_str:>7} | {bet['QUALITY']:>5.1f} | {flag_str:<4}")
+
+            print(f"{'─' * 110}")
+
+            # Summary stats
+            overs  = sum(1 for b in top_plays if b['EDGE'] > 0)
+            unders = len(top_plays) - overs
+            avg_quality = sum(b['QUALITY'] for b in top_plays) / len(top_plays)
+            a_plus_count = sum(1 for b in top_plays if b['GRADE'] == 'A+')
+
+            print(f"\n   📈 {overs} Overs · {unders} Unders · Avg Score: {avg_quality:.1f} · A+ Plays: {a_plus_count}")
+
+            if a_plus_count > 0:
+                print(f"\n   💎 TOP CONVICTION:")
+                for bet in top_plays:
+                    if bet['GRADE'] == 'A+':
+                        side = 'OVER' if bet['EDGE'] > 0 else 'UNDER'
+                        target_str = bet['TARGET'].replace('_1H', ' 1H').replace('FPTS', 'FSCR')
+                        print(f"      {bet['NAME']} {target_str} {side} {bet['PP']} "
+                              f"(AI: {bet['AI']:.1f}, Edge: {bet['PCT_EDGE']:+.1f}%, "
+                              f"L10: {bet['ALIGNED_HIT']*100:.0f}%)")
 
             print()
-
-        # Determine save filename based on actual date used
-        if actual_date:
-            save_path = os.path.join(PROJ_DIR, f"scan_{actual_date}.csv")
         else:
-            save_path = TOMORROW_SCAN_FILE if is_tomorrow else TODAY_SCAN_FILE
+            print(f"\n⚠️  No plays passed quality filters today ({len(deduped_bets)} scanned, 0 qualified)")
+            print(f"   This means no strong edges + hit rate alignment found. Sit today out.\n")
 
-        pd.DataFrame(all_projections).to_csv(save_path, index=False)
-        print(f"\nFull analysis ({len(all_projections)} rows) saved to {save_path}")
+        print(f"Full raw analysis ({len(all_projections)} rows) saved to {save_path}")
     else:
         print("\nNo active lines found.")
 
@@ -1212,7 +1806,20 @@ def scout_player(df_history, models):
         print(f" {'TIER':<10} | {'STAT':<8} | {'PROJ':<14} | {'LINE':^11} | {'WIN%':>6} | SIDE")
         print("-" * 82)
 
-        input_row = prepare_features(player_data, is_home=is_home, missing_usage=missing_usage_today)
+        # Compute actual DAYS_REST for scout_player
+        last_game_date = player_data.get('GAME_DATE')
+        if last_game_date and actual_date:
+            try:
+                last_dt = pd.to_datetime(last_game_date)
+                scan_dt = pd.to_datetime(actual_date)
+                days_rest = max(1, (scan_dt - last_dt).days)
+                days_rest = min(days_rest, 7)
+            except Exception:
+                days_rest = 2
+        else:
+            days_rest = 2
+
+        input_row = prepare_features(player_data, is_home=is_home, days_rest=days_rest, missing_usage=missing_usage_today)
 
         # Lookup FanDuel odds and PrizePicks lines for this player
         player_fd = fd_odds_by_player.get(normalize_name(name), {})
@@ -1303,6 +1910,9 @@ def main():
     if df is None or not models:
         print("Setup failed.")
         return
+
+    print("...Checking for fresh game data")
+    df = auto_refresh_data(df)
 
     while True:
         print("\n" + "="*30 + "\n   NBA AI SCANNER\n" + "="*30)
