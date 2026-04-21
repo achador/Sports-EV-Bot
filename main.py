@@ -46,7 +46,7 @@ def main():
         print("=" * 50)
         
         print("\n1. NBA")
-        print("   13 models  |  PTS 89%, FGM 88%, PA 87%")
+        print("   21 models  |  PTS, REB, AST, FGA, FG3A, PRA, and more")
 
         print("\n2. Tennis")
         print("   7 models   |  ATP + WTA")

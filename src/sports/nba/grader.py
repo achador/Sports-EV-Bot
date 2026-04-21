@@ -1,25 +1,39 @@
 """
 Prediction Accuracy Grader
 
-Compares AI predictions to actual game results and tracks win rate over time.
+Compares scanner predictions to actual game results and tracks win rate.
+Supports single-date grading and retroactive batch grading of all ungraded files.
 
-Output Files:
-    - Updates output/nba/scans/scan_YYYY-MM-DD.csv with Result/Actual columns
-    - Appends to output/nba/scans/win_rate_history.csv
+PrizePicks economics:
+  Standard juice ≈ -115 on each side.
+  Break-even win rate = 1.15 / (1 + 1.15) = 53.5%
+  ROI per bet at -115: win → +$0.87, loss → -$1.00
+
+Output:
+    output/nba/scans/scan_YYYY-MM-DD.csv  (Result + Actual columns added)
+    output/nba/scans/win_rate_history.csv (aggregate history)
 
 Usage:
-    $ python3 -m src.sports.nba.grader
+    # Single date:
+    python3 -m src.sports.nba.grader
+
+    # Grade every ungraded file automatically:
+    python3 -m src.sports.nba.grader --all
 """
 
-import pandas as pd
 import os
+import sys
+import glob
+import argparse
+import pandas as pd
 from datetime import datetime, timedelta
 from nba_api.stats.endpoints import playergamelogs
-from core.config import STAT_MAP
 
-# Resolve project root
-BASE_DIR    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-SCANS_DIR   = os.path.join(BASE_DIR, 'output', 'nba', 'scans')
+BASE_DIR  = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+SCANS_DIR = os.path.join(BASE_DIR, 'output', 'nba', 'scans')
+
+PP_PAYOUT   = 1.0 / 1.15        # $0.87 profit per $1 wagered on a win
+BREAK_EVEN  = 1.15 / 2.15 * 100 # ~53.5%
 
 NBA_STAT_MAP = {
     'Points': 'PTS', 'Rebounds': 'REB', 'Assists': 'AST',
@@ -28,136 +42,237 @@ NBA_STAT_MAP = {
     'FG Made': 'FGM', 'FG Attempted': 'FGA',
     'Free Throws Made': 'FTM', 'Free Throws Attempted': 'FTA',
     'Pts+Rebs+Asts': 'PRA', 'Pts+Rebs': 'PR', 'Pts+Asts': 'PA',
-    'Rebs+Asts': 'RA', 'Blks+Stls': 'SB'
+    'Rebs+Asts': 'RA', 'Blks+Stls': 'SB',
 }
 
 
-def get_user_date():
-    while True:
-        date_str = input("\nEnter the date to grade (YYYY-MM-DD) or press Enter for Yesterday: ")
-        if not date_str.strip():
-            return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        try:
-            datetime.strptime(date_str, "%Y-%m-%d")
-            return date_str
-        except ValueError:
-            print("Invalid format! Please use YYYY-MM-DD")
-
-
-def update_history_file(date_str, wins, losses, total_graded, win_rate):
-    history_file = os.path.join(SCANS_DIR, 'win_rate_history.csv')
-    new_row_data = {
-        "Date": date_str, "Total_Bets": total_graded, "Wins": wins,
-        "Losses": losses, "Win_Rate": f"{win_rate:.2f}%",
-        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    os.makedirs(SCANS_DIR, exist_ok=True)
-    if os.path.exists(history_file):
-        try:
-            df_history = pd.read_csv(history_file)
-            df_history = df_history[df_history['Date'] != date_str]
-            df_final   = pd.concat([df_history, pd.DataFrame([new_row_data])], ignore_index=True)
-        except Exception:
-            df_final = pd.DataFrame([new_row_data])
-    else:
-        df_final = pd.DataFrame([new_row_data])
-    df_final = df_final.sort_values(by='Date', ascending=True)
-    df_final.to_csv(history_file, index=False)
-    print(f"Updated history log: {history_file}")
-
-
-def normalize_name(name):
-    name = name.lower().replace('.', '')
+def normalize_name(name: str) -> str:
+    name = str(name).lower().replace('.', '')
     for suffix in [' jr', ' sr', ' ii', ' iii', ' iv']:
         if name.endswith(suffix):
             name = name[:-len(suffix)]
     return name.strip()
 
 
-def grade_bets():
-    target_date = get_user_date()
-    filename    = os.path.join(SCANS_DIR, f"scan_{target_date}.csv")
+def _season_for_date(date_str: str) -> str:
+    year = int(date_str[:4])
+    month = int(date_str[5:7])
+    season_year = year - 1 if month < 10 else year
+    return f"{season_year}-{str(season_year + 1)[2:]}"
 
-    print(f"\n--- GRADING BETS FOR {target_date} ---")
 
-    if not os.path.exists(filename):
-        print(f"ERROR: No file found at {filename}")
-        return
-
-    df = pd.read_csv(filename)
-
-    print("Fetching actual game results from NBA API...")
-    logs = playergamelogs.PlayerGameLogs(
-        season_nullable='2025-26',
-        date_from_nullable=target_date,
-        date_to_nullable=target_date
+def fetch_box_scores(date_str: str) -> dict:
+    """Fetch actual player stats from NBA API for a given date."""
+    season = _season_for_date(date_str)
+    logs   = playergamelogs.PlayerGameLogs(
+        season_nullable=season,
+        date_from_nullable=date_str,
+        date_to_nullable=date_str
     )
     frames = logs.get_data_frames()
-    if not frames:
-        print("NBA API returned no data.")
-        return
+    if not frames or frames[0].empty:
+        return {}
 
-    box_scores = frames[0]
+    box = frames[0]
     player_stats = {}
-    for _, row in box_scores.iterrows():
-        real_name  = row['PLAYER_NAME']
-        stats      = row.to_dict()
-        stats['PRA'] = row['PTS'] + row['REB'] + row['AST']
-        stats['PR']  = row['PTS'] + row['REB']
-        stats['PA']  = row['PTS'] + row['AST']
-        stats['RA']  = row['REB'] + row['AST']
-        stats['SB']  = row['STL'] + row['BLK']
-        player_stats[real_name] = stats
-        norm = normalize_name(real_name)
-        if norm != real_name.lower():
-            player_stats[norm] = stats
+    for _, row in box.iterrows():
+        d = row.to_dict()
+        d['PRA'] = d['PTS'] + d['REB'] + d['AST']
+        d['PR']  = d['PTS'] + d['REB']
+        d['PA']  = d['PTS'] + d['AST']
+        d['RA']  = d['REB'] + d['AST']
+        d['SB']  = d['STL'] + d['BLK']
+        player_stats[row['PLAYER_NAME']] = d
+        norm = normalize_name(row['PLAYER_NAME'])
+        if norm not in player_stats:
+            player_stats[norm] = d
+    return player_stats
 
-    print(f"Found stats for {len(box_scores)} players.")
 
-    wins = losses = pushes = total_graded = 0
-    results = []
-    actuals = []
+def grade_file(filename: str, player_stats: dict) -> dict:
+    """Grade one scan file in-place. Returns summary dict."""
+    df = pd.read_csv(filename)
+
+    required = {'Player', 'Stat', 'Line', 'Side'}
+    if not required.issubset(df.columns):
+        return {}
+
+    wins = losses = pushes = 0
+    results, actuals = [], []
 
     for _, row in df.iterrows():
-        pp_name = row['Player']
-        prop    = row['Stat']
-        line    = row['Line']
-        side    = row['Side']
+        name = str(row['Player'])
+        stat = str(row['Stat'])
+        side = str(row['Side'])
+        try:
+            line = float(row['Line'])
+        except (ValueError, TypeError):
+            results.append('Bad Line'); actuals.append(0); continue
 
-        stats = player_stats.get(pp_name) or player_stats.get(normalize_name(pp_name))
-        if not stats:
-            results.append("DNP/Unknown"); actuals.append(0); continue
+        player = player_stats.get(name) or player_stats.get(normalize_name(name))
+        if not player:
+            results.append('DNP/Unknown'); actuals.append(0); continue
 
-        nba_col = NBA_STAT_MAP.get(prop)
-        if not nba_col:
-            results.append("Unsupported Stat"); actuals.append(0); continue
+        col = NBA_STAT_MAP.get(stat)
+        if not col:
+            results.append('Unsupported Stat'); actuals.append(0); continue
 
-        actual_val = stats.get(nba_col, 0)
-        actuals.append(actual_val)
+        actual = float(player.get(col, 0))
+        actuals.append(actual)
 
-        if (side == 'Over' and actual_val > line) or (side == 'Under' and actual_val < line):
-            results.append("WIN"); wins += 1; total_graded += 1
-        elif actual_val == line:
-            results.append("Push"); pushes += 1
+        if actual == line:
+            results.append('Push'); pushes += 1
+        elif (side == 'Over' and actual > line) or (side == 'Under' and actual < line):
+            results.append('WIN'); wins += 1
         else:
-            results.append("LOSS"); losses += 1; total_graded += 1
+            results.append('LOSS'); losses += 1
 
     df['Result'] = results
     df['Actual'] = actuals
     df.to_csv(filename, index=False)
-    print(f"Updated daily file: {filename}")
 
-    if total_graded > 0:
-        win_rate = (wins / total_graded) * 100
-        print(f"\n--- REPORT CARD ({target_date}) ---")
-        print(f"Wins:   {wins}")
-        print(f"Losses: {losses}")
-        print(f"Pushes: {pushes} (Excluded)")
-        print(f"WIN RATE: {win_rate:.2f}%")
-        update_history_file(target_date, wins, losses, total_graded, win_rate)
+    total = wins + losses
+    wr    = wins / total * 100 if total else 0
+    roi   = (wins * PP_PAYOUT - losses) / total * 100 if total else 0
+
+    return {'wins': wins, 'losses': losses, 'pushes': pushes, 'total': total, 'win_rate': wr, 'roi': roi}
+
+
+def update_history(date_str: str, s: dict):
+    history_path = os.path.join(SCANS_DIR, 'win_rate_history.csv')
+    row = {
+        'Date': date_str, 'Total_Bets': s['total'],
+        'Wins': s['wins'], 'Losses': s['losses'],
+        'Win_Rate': f"{s['win_rate']:.2f}%",
+        'ROI_Pct': f"{s['roi']:+.2f}%",
+        'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    os.makedirs(SCANS_DIR, exist_ok=True)
+    if os.path.exists(history_path):
+        try:
+            hist = pd.read_csv(history_path)
+            hist = hist[hist['Date'] != date_str]
+            hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
+        except Exception:
+            hist = pd.DataFrame([row])
     else:
-        print("No settled bets found.")
+        hist = pd.DataFrame([row])
+    hist.sort_values('Date').to_csv(history_path, index=False)
 
 
-if __name__ == "__main__":
-    grade_bets()
+def print_report(date_str: str, s: dict, filename: str):
+    print(f"\n  {date_str}: {s['wins']}W / {s['losses']}L / {s['pushes']} Push  "
+          f"→ {s['win_rate']:.1f}% win rate  |  ROI {s['roi']:+.1f}%")
+    if s['total'] > 0:
+        arrow = "✓ PROFITABLE" if s['win_rate'] >= BREAK_EVEN else "✗ below break-even"
+        print(f"    {arrow} (break-even = {BREAK_EVEN:.1f}%)")
+
+
+def grade_single():
+    while True:
+        date_str = input("\nDate to grade (YYYY-MM-DD) or Enter for yesterday: ").strip()
+        if not date_str:
+            date_str = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        try:
+            datetime.strptime(date_str, '%Y-%m-%d')
+            break
+        except ValueError:
+            print("Invalid format.")
+
+    filename = os.path.join(SCANS_DIR, f"scan_{date_str}.csv")
+    if not os.path.exists(filename):
+        print(f"ERROR: {filename} not found")
+        return
+
+    print(f"Fetching NBA results for {date_str}...")
+    player_stats = fetch_box_scores(date_str)
+    if not player_stats:
+        print("No NBA data returned.")
+        return
+
+    s = grade_file(filename, player_stats)
+    if s:
+        print_report(date_str, s, filename)
+        update_history(date_str, s)
+
+
+def grade_all_ungraded():
+    """Grade every scan file that has no Result column yet."""
+    files = sorted(glob.glob(os.path.join(SCANS_DIR, 'scan_20*.csv')))
+    ungraded = []
+    for f in files:
+        try:
+            df = pd.read_csv(f)
+            if 'Result' not in df.columns or df['Result'].isna().all():
+                date_str = os.path.basename(f).replace('scan_', '').replace('.csv', '')
+                try:
+                    datetime.strptime(date_str, '%Y-%m-%d')
+                    ungraded.append((date_str, f))
+                except ValueError:
+                    pass
+        except Exception:
+            pass
+
+    if not ungraded:
+        print("No ungraded files found.")
+        return
+
+    print(f"\nGrading {len(ungraded)} ungraded file(s):\n")
+
+    all_wins = all_losses = all_pushes = 0
+    for date_str, filename in ungraded:
+        print(f"  Fetching {date_str}...", end='', flush=True)
+        try:
+            player_stats = fetch_box_scores(date_str)
+            if not player_stats:
+                print("  (no NBA data)")
+                continue
+            s = grade_file(filename, player_stats)
+            if s:
+                update_history(date_str, s)
+                print_report(date_str, s, filename)
+                all_wins   += s['wins']
+                all_losses += s['losses']
+                all_pushes += s['pushes']
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    total = all_wins + all_losses
+    if total > 0:
+        wr  = all_wins / total * 100
+        roi = (all_wins * PP_PAYOUT - all_losses) / total * 100
+        print(f"\n{'='*50}")
+        print(f"  CUMULATIVE  {all_wins}W / {all_losses}L / {all_pushes} Push")
+        print(f"  Win Rate:   {wr:.1f}%  (break-even = {BREAK_EVEN:.1f}%)")
+        print(f"  ROI:        {roi:+.1f}% per $1 bet")
+
+        # Per-stat breakdown
+        all_files = sorted(glob.glob(os.path.join(SCANS_DIR, 'scan_20*.csv')))
+        dfs = []
+        for f in all_files:
+            try:
+                d = pd.read_csv(f)
+                if 'Result' in d.columns and 'Stat' in d.columns:
+                    dfs.append(d)
+            except Exception:
+                pass
+        if dfs:
+            combined = pd.concat(dfs, ignore_index=True)
+            settled  = combined[combined['Result'].isin(['WIN', 'LOSS'])]
+            if not settled.empty:
+                print(f"\n  Per-stat breakdown:")
+                for stat, grp in settled.groupby('Stat'):
+                    w = (grp['Result'] == 'WIN').sum()
+                    t = len(grp)
+                    print(f"    {stat:<25} {w}/{t}  ({w/t*100:.1f}%)")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--all', action='store_true', help='Grade all ungraded scan files')
+    args = parser.parse_args()
+
+    if args.all:
+        grade_all_ungraded()
+    else:
+        grade_single()

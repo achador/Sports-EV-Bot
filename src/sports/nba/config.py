@@ -69,43 +69,56 @@ STAT_MAP = {
     '1H Fantasy Score': 'FPTS_1H'
 }
 
-# 4. Model Quality Tiers (Based on Actual Directional Accuracy)
-# Updated: 2026-02-13
+# 4. Model Quality Tiers
+# Updated: 2026-04-21 — per-stat edge thresholds derived from walk-forward
+# backtest on 28k held-out rows, using player L10-median as the proxy line.
+#
+# Per-stat minimum edge that produces >53.5% win rate (break-even at -115):
+#   FGA    >=10% → 55.6%+   FG3A  >=10% → 53.5%+   AST   >=10% → 54.3%+
+#   FGM    >=10% → 54.4%+   PRA   >=10% → 53.8%+   PTS   >=10% → 53.5%+
+#   RA     >=15% → 56.1%+   REB   >=15% → 54.5%+   PA    >=15% → 54.0%+
+#   FPTS   >=15% → 55.5%+   PR    >=20% → 54.4%+   FTM   >=20% → 54.3%+
+#   FTA    >=20% → 54.0%+   PRA_1H>=20% → 54.1%+
+#   PTS_1H >=25% → 53.9%+   FPTS_1H>=30%→ 55.0%+
+#   BLK    >=5%  → 56.6% (5-10% bucket ONLY — inconsistent, use caution)
+#   FG3M / SB / STL / TOV — NEVER profitable at any tested edge level.
+#     These are included at 40% threshold so rare extreme cases surface, but
+#     they are labeled SPECULATIVE and should not be core of any strategy.
 MODEL_TIERS = {
     'ELITE': {
-        'models': ['PTS', 'FGM', 'PA', 'PR', 'PRA', 'FPTS', 'PTS_1H', 'PRA_1H'],
-        'accuracy_range': '85-90%',
-        'edge_threshold': 1.5,
-        'description': '⭐ Highest confidence - bet heavily',
+        'models': ['FGA', 'FG3A', 'AST', 'FGM', 'PRA', 'PTS'],
+        'accuracy_range': '53.5-55.6%',
+        'edge_threshold': 10.0,
+        'description': '⭐ Core plays — profitable at >=10% edge',
         'emoji': '⭐'
     },
     'STRONG': {
-        'models': ['FG3A', 'FGA', 'FPTS_1H'],
-        'accuracy_range': '80-85%',
-        'edge_threshold': 2.0,
-        'description': '✔ Good confidence - bet selectively',
+        'models': ['RA', 'REB', 'PA', 'FPTS'],
+        'accuracy_range': '54.0-56.1%',
+        'edge_threshold': 15.0,
+        'description': '✔ Strong plays — profitable at >=15% edge',
         'emoji': '✔'
     },
     'DECENT': {
-        'models': ['FG3M', 'FTA', 'RA', 'FTM', 'REB', 'AST'],
-        'accuracy_range': '72-80%',
-        'edge_threshold': 2.5,
-        'description': '~ Moderate confidence - bet carefully',
+        'models': ['PR', 'FTM', 'FTA', 'PRA_1H'],
+        'accuracy_range': '54.0-54.4%',
+        'edge_threshold': 20.0,
+        'description': '~ Good plays — profitable at >=20% edge',
         'emoji': '~'
     },
     'RISKY': {
-        'models': ['STL', 'TOV'],
-        'accuracy_range': '61-71%',
-        'edge_threshold': 3.0,
-        'description': '⚠️ High variance - bet only large edges',
+        'models': ['PTS_1H', 'FPTS_1H', 'BLK'],
+        'accuracy_range': '53.9-56.6%',
+        'edge_threshold': 25.0,
+        'description': '⚠️ High-edge only — 25%+ needed for +EV',
         'emoji': '⚠️'
     },
-    'AVOID': {
-        'models': ['BLK', 'SB'],
-        'accuracy_range': '35-53%',
-        'edge_threshold': 10.0,
-        'description': '❌ Too random - avoid unless huge edge',
-        'emoji': '❌'
+    'SPECULATIVE': {
+        'models': ['FG3M', 'SB', 'STL', 'TOV'],
+        'accuracy_range': '~47-50%',
+        'edge_threshold': 40.0,
+        'description': '🎲 Lottery plays — model has no reliable edge',
+        'emoji': '🎲'
     }
 }
 
@@ -119,9 +132,10 @@ for tier, data in MODEL_TIERS.items():
             'emoji': data['emoji']
         }
 
-# 5. Scanning Mode
-# Controls which model tiers to include in a scan run.
-# Options: 'ELITE_ONLY', 'SAFE', 'BALANCED', 'AGGRESSIVE', 'ALL'
+# 5. Scanning Mode — ALL stats always active; thresholds above do the filtering.
+# Each stat's edge_threshold is the minimum % gap (AI proj vs line) needed to show
+# a bet. This was derived from per-stat backtest calibration, so changing the
+# mode doesn't help — the threshold per stat is what matters.
 SCANNING_MODE = 'ALL'
 
 SCANNING_MODES = {
@@ -129,23 +143,21 @@ SCANNING_MODES = {
     'SAFE':       MODEL_TIERS['ELITE']['models'] + MODEL_TIERS['STRONG']['models'],
     'BALANCED':   MODEL_TIERS['ELITE']['models'] + MODEL_TIERS['STRONG']['models'] + MODEL_TIERS['DECENT']['models'],
     'AGGRESSIVE': MODEL_TIERS['ELITE']['models'] + MODEL_TIERS['STRONG']['models'] + MODEL_TIERS['DECENT']['models'] + MODEL_TIERS['RISKY']['models'],
-    'ALL':        list(MODEL_QUALITY.keys())
+    'ALL':        [m for tier in MODEL_TIERS.values() for m in tier['models']],
 }
 
-ACTIVE_TARGETS = SCANNING_MODES.get(SCANNING_MODE, SCANNING_MODES['BALANCED'])
+ACTIVE_TARGETS = SCANNING_MODES.get(SCANNING_MODE, SCANNING_MODES['ALL'])
 
 mode_descriptions = {
-    'ELITE_ONLY': "⭐ ELITE ONLY - 5 models (85%+), max accuracy",
-    'SAFE':       "✔ SAFE MODE - 7 models (80%+), high confidence",
-    'BALANCED':   "📊 BALANCED - 13 models (72%+), includes REB/AST",
-    'AGGRESSIVE': "⚡ AGGRESSIVE - 15 models (61%+), includes STL/TOV",
-    'ALL':        "🎲 ALL MODELS - 17 models (includes BLK/SB)"
+    'ELITE_ONLY': "⭐ ELITE — 6 core stats, >=10% edge",
+    'SAFE':       "✔ SAFE — 10 profitable stats, >=10-15% edge",
+    'BALANCED':   "📊 BALANCED — 14 stats, >=10-20% edge",
+    'AGGRESSIVE': "⚡ AGGRESSIVE — 17 stats, >=10-25% edge",
+    'ALL':        "🎲 ALL — every stat incl. speculative (calibrated per-stat threshold)",
 }
 
 print(f"⚙️  {mode_descriptions.get(SCANNING_MODE, 'UNKNOWN MODE')}")
 print(f"   Scanning: {', '.join(ACTIVE_TARGETS)}")
-if SCANNING_MODE == 'BALANCED':
-    print(f"   Excluded: {', '.join(MODEL_TIERS['RISKY']['models'] + MODEL_TIERS['AVOID']['models'])}")
 
 # 6. Injury Adjustment — Absorption Rates
 # What fraction of a missing player's production redistributes to active teammates.
