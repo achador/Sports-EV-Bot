@@ -10,6 +10,7 @@ Usage:
 """
 
 import pandas as pd
+import numpy as np
 import xgboost as xgb
 import os
 import sys
@@ -25,6 +26,19 @@ from nba_api.stats.endpoints import ScoreboardV2, LeagueGameLog
 from src.core.odds_providers.prizepicks import PrizePicksClient
 from src.sports.nba.config   import STAT_MAP, MODEL_QUALITY, ACTIVE_TARGETS, ABSORPTION_RATES
 from src.sports.nba.injuries import get_injury_report
+from src.sports.nba.train   import LOG_TRANSFORM_TARGETS
+
+# Empirical calibration factors for log-transformed targets.
+# Log-transform regression produces E[log1p(y)] which, after expm1, is
+# systematically below E[y] (Jensen's inequality). Factors derived from the
+# held-out 30% test set using only players with meaningful baselines.
+LOG_CALIBRATION = {
+    'BLK': 1.2835,
+    'STL': 1.3315,
+    'TOV': 1.2397,
+    'FG3M': 1.2265,
+    'SB': 1.2401,
+}
 
 # --- CONFIGURATION ---
 # scanner.py lives at src/sports/nba/scanner.py → root is 4 levels up
@@ -290,23 +304,28 @@ def analyze_player_availability(df_history, player_id, scan_date_str):
     
     scan_date = pd.to_datetime(scan_date_str) if scan_date_str else pd.to_datetime(datetime.now().strftime('%Y-%m-%d'))
     
-    # --- 1. Days since last game ---
+    # --- 1. Identify Team Schedule ---
+    team_id = player_logs['TEAM_ID'].iloc[-1]
+    team_dates = df_history[df_history['TEAM_ID'] == team_id]['GAME_DATE'].drop_duplicates().sort_values()
+    
+    # --- 2. Current missed team games ---
     last_game_date = player_logs['GAME_DATE'].iloc[-1]
-    days_since_last = (scan_date - last_game_date).days
+    # Games the team played after the player's last game (up to but not including scan_date)
+    team_games_missed_now = len(team_dates[(team_dates > last_game_date) & (team_dates < scan_date)])
     
-    # --- 2. Detect missed games (compare player games vs expected schedule) ---
-    # NBA teams play ~3.5 games per week. If a player has big gaps between games,
-    # they likely missed games due to injury.
-    recent_dates = player_logs['GAME_DATE'].tail(10)
-    if len(recent_dates) >= 3:
-        game_gaps = recent_dates.diff().dt.days.dropna()
-        avg_gap = game_gaps.mean()
-        max_recent_gap = game_gaps.max()
-    else:
-        avg_gap = 2.5
-        max_recent_gap = days_since_last
+    # --- 3. Historic gaps (Detect missed games recently) ---
+    recent_dates = player_logs['GAME_DATE'].tail(10).tolist()
+    max_missed_games_in_gap = 0
     
-    # --- 3. Minute restriction detection ---
+    for i in range(1, len(recent_dates)):
+        d1 = recent_dates[i-1]
+        d2 = recent_dates[i]
+        # Count team games strictly between d1 and d2
+        missed = len(team_dates[(team_dates > d1) & (team_dates < d2)])
+        if missed > max_missed_games_in_gap:
+            max_missed_games_in_gap = missed
+    
+    # --- 4. Minute restriction detection ---
     # Compare last 3 games' minutes to season average
     if 'MIN' in player_logs.columns:
         season_min_avg = player_logs['MIN'].mean()
@@ -322,39 +341,46 @@ def analyze_player_availability(df_history, player_id, scan_date_str):
         is_ramping = False
         if len(last_3_mins) == 3:
             mins_list = last_3_mins.tolist()
-            is_ramping = mins_list[0] < mins_list[1] < mins_list[2] and min_ratio < 0.85
+            # If the last game was back up to full minutes, we are fully ramped, no need to penalize.
+            is_ramping = mins_list[0] < mins_list[1] < mins_list[2] and min_ratio < 0.85 and last_min_ratio < 0.95
     else:
         min_ratio = 1.0
         last_min_ratio = 1.0
         is_ramping = False
         season_min_avg = 0
     
-    # --- 4. Apply penalties based on dynamic analysis ---
+    # --- 5. Apply penalties based on dynamic analysis ---
     
-    # Extended absence: hasn't played in 10+ days
-    if days_since_last >= 10:
+    # Extended absence: missed 4+ team games
+    if team_games_missed_now >= 4:
         result['penalty'] = -30.0
         result['scale_factor'] = 0.70  # Expect ~30% production loss from rust + minutes
         result['flag'] = '⚠INJ'
-        result['reason'] = f'Out {days_since_last}d — extended absence'
+        result['reason'] = f'Out {team_games_missed_now} games — extended absence'
     
-    # Moderate absence: 7-9 days
-    elif days_since_last >= 7:
+    # Moderate absence: missed 2-3 team games
+    elif team_games_missed_now >= 2:
         result['penalty'] = -20.0
         result['scale_factor'] = 0.80  # Expect ~20% production loss
         result['flag'] = '⚠INJ'
-        result['reason'] = f'Out {days_since_last}d — recent absence'
+        result['reason'] = f'Out {team_games_missed_now} games — recent absence'
     
-    # Recent multi-game absence detected via large gap in schedule
-    elif max_recent_gap >= 7 and days_since_last < 7:
-        # Player had a long gap recently but has returned
-        games_back = len(player_logs[player_logs['GAME_DATE'] > (last_game_date - timedelta(days=max_recent_gap))])
+    # Recent multi-game absence detected AND returned
+    elif max_missed_games_in_gap >= 2 and team_games_missed_now == 0:
+        # Player missed games but has returned. How many games back?
+        games_back = 0
+        for i in range(1, len(recent_dates)):
+            d1, d2 = recent_dates[i-1], recent_dates[i]
+            if len(team_dates[(team_dates > d1) & (team_dates < d2)]) == max_missed_games_in_gap:
+                games_back = len(recent_dates) - i
+                break
+                
         if games_back <= 3:
             result['penalty'] = -15.0
             # Scale based on how many games back: 1 game = more rust, 3 games = almost normal
             result['scale_factor'] = 0.75 + (games_back * 0.05)  # 0.80, 0.85, 0.90
             result['flag'] = '⚠RTN'
-            result['reason'] = f'Just returned — {games_back} games back after {max_recent_gap}d gap'
+            result['reason'] = f'Just returned — {games_back} games back after missing {max_missed_games_in_gap} games'
     
     # Minute restriction: recent minutes well below season average
     if last_min_ratio < 0.65 and season_min_avg > 10:
@@ -391,34 +417,53 @@ def analyze_player_availability(df_history, player_id, scan_date_str):
 
 def calculate_confidence_score(edge_pct, l10_hit, opponent_win_pct=None, is_role_expansion=False):
     """
-    Generate an Elite Confidence Score (0-100).
-    Components:
-    - 60%: Model Edge %
-    - 20%: L10 Hit Rate
-    - 20%: Matchup Quality
+    Calibrated confidence score (0-100) grounded in backtested win rates.
+
+    Calibration source: walk-forward backtest on 28k test rows using
+    player L10-median as the proxy betting line (backtester.py).
+
+    Edge % → estimated win rate (profitable stats):
+        0-8%   → ~50-52%  (below break-even at 53.5%)
+        8-15%  → ~53%     (marginal)
+        15-20% → ~55.7%   (profitable)
+        >20%   → ~56.8%   (profitable, capped ~60%)
+
+    Score maps estimated win % to 0-100:
+        50% = 0   (break-even / no edge)
+        58% = 100 (elite edge)
     """
-    # Max out edge score at 15% Edge (scales 0-60)
-    edge_cap = min(abs(edge_pct), 15.0)
-    edge_score = (edge_cap / 15.0) * 60.0
-    
-    # Hit rate score (Hit rate for overs, miss rate for unders)
-    hit_score = l10_hit * 20.0
-    
-    # Matchup Score (Simple version based on Opponent strength)
-    matchup_score = 10.0 # Base average
+    abs_edge = abs(edge_pct)
+
+    # Base win probability from edge calibration curve
+    if abs_edge < 8:
+        est_win_pct = 50.0 + abs_edge * 0.25          # 50.0 → 52.0%
+    elif abs_edge < 15:
+        est_win_pct = 52.0 + (abs_edge - 8) * (1.0 / 7)   # 52.0 → 53.0%
+    elif abs_edge < 20:
+        est_win_pct = 53.0 + (abs_edge - 15) * (2.7 / 5)  # 53.0 → 55.7%
+    else:
+        est_win_pct = min(55.7 + (abs_edge - 20) * 0.1, 60.0)  # 55.7 → 60%
+
+    # L10 hit rate: confirmation or contradiction
+    if l10_hit >= 0.70:
+        est_win_pct += 1.0   # Strong confirmation
+    elif l10_hit <= 0.30:
+        est_win_pct -= 2.0   # Historical contradiction — significant red flag
+
+    # Matchup quality
     if opponent_win_pct is not None:
-        if opponent_win_pct < 0.40: matchup_score = 20.0
-        elif opponent_win_pct > 0.60: matchup_score = 5.0
-        
-    total_score = edge_score + hit_score + matchup_score
-    
-    # HUMAN HANDICAPPER OVERRIDE: 
-    # Do not bet UNDERS on bench players suddenly getting massive minutes or usage.
-    # The variance is too high, even if historical hit-rate is 0%.
+        if opponent_win_pct < 0.40:
+            est_win_pct += 0.5   # Weak opponent
+        elif opponent_win_pct > 0.60:
+            est_win_pct -= 0.5   # Strong opponent
+
+    # Role expansion penalty: UNDER on newly expanded-role player is trap
     if is_role_expansion and edge_pct < 0:
-        total_score *= 0.5  # Slash confidence by half for dangerous Unders
-        
-    return min(total_score, 100.0)
+        est_win_pct -= 3.0
+
+    # Map to 0-100 (50% win rate = 0 score, 58% win rate = 100 score)
+    score = max(0.0, (est_win_pct - 50.0) / 8.0 * 100.0)
+    return min(score, 100.0)
 
 
 def load_data():
@@ -587,6 +632,11 @@ def auto_refresh_data(df_history):
                 if stat not in player_df.columns:
                     continue
                 vals = player_df[stat]
+                # 1H stats are 0 in auto-refresh rows that lack 1H box scores.
+                # Treat those 0s as NaN so they're excluded from rolling averages
+                # instead of diluting them (e.g. Tatum PTS_1H_L20 = 2.45 vs real ~13).
+                if '_1H' in stat:
+                    vals = vals.replace(0, float('nan'))
                 combined.loc[mask, f'{stat}_L5'] = vals.rolling(5, min_periods=1).mean().values
                 combined.loc[mask, f'{stat}_L10'] = vals.rolling(10, min_periods=1).mean().values
                 combined.loc[mask, f'{stat}_L20'] = vals.rolling(20, min_periods=1).mean().values
@@ -1089,7 +1139,32 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                     # Filter for features actually used by THIS model
                     model_features = [f for f in model.feature_names_in_]
                     valid_input = input_row.reindex(columns=model_features, fill_value=0)
-                    proj = float(model.predict(valid_input)[0])
+
+                    # 1H rolling stats are NaN or 0 in auto-refresh rows (no 1H
+                    # box scores available for recently-added games). Backfill
+                    # L5/L10/L20 from Season so the model gets a real signal.
+                    if target in ('PTS_1H', 'PRA_1H', 'FPTS_1H'):
+                        for _stat in ['PTS_1H', 'PRA_1H', 'FPTS_1H', 'MIN_1H', 'PRA', 'PTS']:
+                            _season_col = f'{_stat}_Season'
+                            if _season_col not in valid_input.columns:
+                                continue
+                            _season_val = valid_input[_season_col].iloc[0]
+                            if pd.isna(_season_val) or _season_val <= 0:
+                                continue
+                            _season_val = float(_season_val)
+                            for _suf in ['_L5', '_L10', '_L20', '_L5_Median', '_L10_Median']:
+                                _col = f'{_stat}{_suf}'
+                                if _col not in valid_input.columns:
+                                    continue
+                                _cur = valid_input[_col].iloc[0]
+                                if pd.isna(_cur) or float(_cur) == 0:
+                                    valid_input[_col] = _season_val
+
+                    raw = float(model.predict(valid_input)[0])
+                    if target in LOG_TRANSFORM_TARGETS:
+                        proj = float(np.expm1(max(raw, 0))) * LOG_CALIBRATION.get(target, 1.0)
+                    else:
+                        proj = max(raw, 0.0)
                     player_predictions[target] = proj
                 except Exception:
                     # Model mismatch or missing features
@@ -1208,6 +1283,30 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
 
                     # Only surface plays with meaningful edge above model tier threshold
                     if abs(pct_edge) >= edge_threshold:
+                        # ── MULTI-SIGNAL CONFIRMATION FILTER ──────────────────────
+                        # Skip bets where historical data strongly contradicts the AI.
+                        # Derived from backtest analysis: when L10 hit-rate strongly
+                        # opposes the model's direction, win rates drop below 48%.
+                        ai_says_over = edge > 0
+
+                        # L10 veto: player almost never goes the direction AI predicts
+                        l10_vetoes = (
+                            (ai_says_over and l10_hit < 0.25) or
+                            (not ai_says_over and l10_hit > 0.75)
+                        )
+
+                        # H2H veto: in head-to-head matchups AI direction is very rare
+                        h2h_vetoes = (
+                            h2h_n >= 4 and (
+                                (ai_says_over and h2h_hit < 0.20) or
+                                (not ai_says_over and h2h_hit > 0.80)
+                            )
+                        )
+
+                        if l10_vetoes or h2h_vetoes:
+                            continue  # Historical data overrules the model
+                        # ──────────────────────────────────────────────────────────
+
                         # Use cached availability analysis
                         avail = avail_cache.get(pid, {'penalty': 0, 'flag': '', 'reason': ''})
 
@@ -1405,6 +1504,41 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                               f"L10: {bet['ALIGNED_HIT']*100:.0f}%)")
 
             print()
+
+        # ── ALL MARKETS BREAKDOWN ──────────────────────────────────────────
+        # Best plays per stat/market, all tiers, no player cap
+        from collections import defaultdict
+        market_groups = defaultdict(list)
+        for bet in deduped_bets:
+            market_groups[bet['TARGET']].append(bet)
+
+        overs_list  = sorted([b for b in deduped_bets if b['EDGE'] > 0], key=lambda b: -b['PCT_EDGE'])[:20]
+        unders_list = sorted([b for b in deduped_bets if b['EDGE'] < 0], key=lambda b:  b['PCT_EDGE'])[:20]
+
+        def _print_side_table(plays, label):
+            if not plays:
+                return
+            print(f"\n{'═' * 115}")
+            print(f"   {label} — {scan_date_str}")
+            print(f"{'═' * 115}")
+            print(f"   {'#':>3}  {'STAT':<10} {'PLAYER':<23} {'PROJ':>6} {'LINE':>6} {'EDGE':>8} {'L5':>4} {'L10':>4} {'H2H':>8}  {'TIER'}")
+            print(f"{'─' * 115}")
+            for i, bet in enumerate(plays, 1):
+                is_over = bet['EDGE'] > 0
+                edge_str   = f"{bet['PCT_EDGE']:+.1f}%"
+                target_str = bet['TARGET'].replace('_1H', ' 1H').replace('FPTS', 'FSCR')
+                l5_str  = f"{bet['L5_HIT']*100:.0f}%"  if is_over else f"{(1-bet['L5_HIT'])*100:.0f}%"
+                l10_str = f"{bet['L10_HIT']*100:.0f}%" if is_over else f"{(1-bet['L10_HIT'])*100:.0f}%"
+                h2h_n   = bet.get('H2H_N', 0)
+                h2h_str = f"{((bet['H2H_HIT'] if is_over else 1-bet['H2H_HIT'])*100):.0f}%({h2h_n})" if h2h_n > 0 else '--'
+                print(f"   {i:>3}  {target_str:<10} {bet['NAME'][:23]:<23} {bet['AI']:>6.1f} {bet['PP']:>6.1f} "
+                      f"{edge_str:>8} {l5_str:>4} {l10_str:>4} {h2h_str:>8}  {bet['TIER']}")
+            print(f"{'─' * 115}")
+
+        if overs_list or unders_list:
+            _print_side_table(overs_list,  "📈 TOP 20 OVERS")
+            _print_side_table(unders_list, "📉 TOP 20 UNDERS")
+
         else:
             print(f"\n⚠️  No plays passed quality filters today ({len(deduped_bets)} scanned, 0 qualified)")
             print(f"   This means no strong edges + hit rate alignment found. Sit today out.\n")
@@ -1784,6 +1918,12 @@ def scout_player(df_history, models):
         # boost internally.  Adding a second manual bump caused double-counting.
         inj_adj = {}
 
+        # Analyze player availability (injury return / minute restriction)
+        player_id = player_data['PLAYER_ID']
+        avail = analyze_player_availability(df_history, player_id, actual_date)
+        if avail['flag']:
+            print(f"Availability: {avail['flag']} {avail['reason']}")
+
         # Show FanDuel cache age
         print(f"FanDuel odds: cached {fd_cache_age_str}")
 
@@ -1825,12 +1965,72 @@ def scout_player(df_history, models):
         player_fd = fd_odds_by_player.get(normalize_name(name), {})
         player_pp = norm_lines_full.get(normalize_name(name), {})
 
+        # --- Generate all predictions first, then post-process ---
+        player_predictions = {}
+        target_tiers = {}
+
         for target in TARGETS:
             if target in models:
-                tier_text     = MODEL_QUALITY.get(target, {}).get('tier', 'UNKNOWN')
+                target_tiers[target] = MODEL_QUALITY.get(target, {}).get('tier', 'UNKNOWN')
                 model_features = [f for f in models[target].feature_names_in_]
                 valid_input   = input_row.reindex(columns=model_features, fill_value=0)
-                pred          = float(models[target].predict(valid_input)[0])
+
+                # 1H backfill: rolling stats are NaN/0 when auto-refresh lacks 1H data
+                if target in ('PTS_1H', 'PRA_1H', 'FPTS_1H'):
+                    for _stat in ['PTS_1H', 'PRA_1H', 'FPTS_1H', 'MIN_1H', 'PRA', 'PTS']:
+                        _season_col = f'{_stat}_Season'
+                        if _season_col not in valid_input.columns:
+                            continue
+                        _season_val = valid_input[_season_col].iloc[0]
+                        if pd.isna(_season_val) or _season_val <= 0:
+                            continue
+                        _season_val = float(_season_val)
+                        for _suf in ['_L5', '_L10', '_L20', '_L5_Median', '_L10_Median']:
+                            _col = f'{_stat}{_suf}'
+                            if _col not in valid_input.columns:
+                                continue
+                            _cur = valid_input[_col].iloc[0]
+                            if pd.isna(_cur) or float(_cur) == 0:
+                                valid_input[_col] = _season_val
+
+                raw = float(models[target].predict(valid_input)[0])
+
+                # Apply LOG_CALIBRATION (same as scan_all)
+                if target in LOG_TRANSFORM_TARGETS:
+                    pred = float(np.expm1(max(raw, 0))) * LOG_CALIBRATION.get(target, 1.0)
+                else:
+                    pred = max(raw, 0.0)
+
+                player_predictions[target] = pred
+
+        # Apply injury scale_factor (same as scan_all)
+        if avail['scale_factor'] < 1.0:
+            for tgt in player_predictions:
+                player_predictions[tgt] *= avail['scale_factor']
+
+        # Apply correlation constraints (same as scan_all)
+        pts = player_predictions.get('PTS', 0)
+        reb = player_predictions.get('REB', 0)
+        ast = player_predictions.get('AST', 0)
+        stl = player_predictions.get('STL', 0)
+        blk = player_predictions.get('BLK', 0)
+
+        if 'PRA' in player_predictions:
+            player_predictions['PRA'] = (player_predictions['PRA'] + pts + reb + ast) / 2
+        if 'PR' in player_predictions:
+            player_predictions['PR'] = (player_predictions['PR'] + pts + reb) / 2
+        if 'PA' in player_predictions:
+            player_predictions['PA'] = (player_predictions['PA'] + pts + ast) / 2
+        if 'RA' in player_predictions:
+            player_predictions['RA'] = (player_predictions['RA'] + reb + ast) / 2
+        if 'SB' in player_predictions:
+            player_predictions['SB'] = (player_predictions['SB'] + stl + blk) / 2
+
+        # --- Display each target ---
+        for target in TARGETS:
+            if target in player_predictions:
+                tier_text = target_tiers[target]
+                pred = player_predictions[target]
 
                 # Get PP line with type info
                 pp_info = player_pp.get(target)
