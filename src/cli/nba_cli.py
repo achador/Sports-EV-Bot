@@ -42,7 +42,6 @@ OUTPUT_DIR = os.path.join(_BASE, 'output', 'nba', 'scans')
 
 # --- HELPER: RUN AI PREDICTIONS ---
 def get_ai_predictions():
-    print("Loading AI models & data...")
     refresh_injuries()  # Fresh injury data for accurate projections
     df_history = load_data()
     models     = load_models()
@@ -76,14 +75,14 @@ def get_ai_predictions():
     if not all_teams:
         return pd.DataFrame()
 
-    print("Generating AI projections...")
     ai_results = []
 
     for team_id, info in all_teams.items():
         team_players = df_history[df_history['TEAM_ID'] == team_id]['PLAYER_ID'].unique()
 
-        # Calculate missing usage from injured (OUT) teammates — boosts projections for healthy players
+        # Calculate missing usage + OUT count for USAGE_VACUUM fix
         missing_usage_today = 0.0
+        team_out_count = 0
         for pid in team_players:
             p_rows = df_history[df_history['PLAYER_ID'] == pid].sort_values('GAME_DATE')
             if p_rows.empty:
@@ -93,6 +92,7 @@ def get_ai_predictions():
                 usage = last_row.get('USAGE_RATE_Season', 0)
                 if usage > 15:
                     missing_usage_today += usage
+                    team_out_count += 1
 
         for pid in team_players:
             p_rows = df_history[df_history['PLAYER_ID'] == pid].sort_values('GAME_DATE')
@@ -110,6 +110,11 @@ def get_ai_predictions():
                 is_home=info['is_home'],
                 missing_usage=missing_usage_today
             )
+
+            # Fix stale USAGE_VACUUM: each OUT teammate reduces STAR_COUNT by 1,
+            # so USAGE_VACUUM (= TEAM_AVG_STARS - STAR_COUNT) increases by out count.
+            if team_out_count > 0 and 'USAGE_VACUUM' in input_row.columns:
+                input_row['USAGE_VACUUM'] = float(input_row['USAGE_VACUUM'].iloc[0]) + team_out_count
 
             for target, model in models.items():
                 if target not in ACTIVE_TARGETS:
@@ -217,13 +222,11 @@ def run_correlated_scanner():
         return
 
     # 2. AI Projections
-    print("\n--- 2. Generating AI Projections ---")
     try:
         ai_df = get_ai_predictions()
         if ai_df.empty:
             print("Could not generate AI projections.")
             return
-        print(f"Generated {len(ai_df)} AI projections.")
     except Exception as e:
         print(f"Error in AI Scanner: {e}")
         return
