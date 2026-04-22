@@ -1083,24 +1083,26 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
         # O(1) Lookup for roster
         team_players = team_rosters_map.get(team_id, [])
 
-        # Calculate missing usage (injured players)
+        # Calculate missing usage + count of OUT teammates (for USAGE_VACUUM fix)
         missing_usage_today = 0.0
+        team_out_count = 0
         for pid in team_players:
             # O(1) Lookup for player data
             last_row = latest_rows_map.get(pid)
             if not last_row: continue
-            
+
             pname = last_row['PLAYER_NAME']
             if get_player_status(pname) == 'OUT':
                 usage = last_row.get('USAGE_RATE_Season', 0)
                 if usage > 15:
                     missing_usage_today += usage
+                    team_out_count += 1
 
         # Generate predictions for each player
         for pid in team_players:
             last_row = latest_rows_map.get(pid)
             if not last_row: continue
-            
+
             player_name = last_row['PLAYER_NAME']
 
             if get_player_status(player_name) == 'OUT':
@@ -1129,6 +1131,13 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
                 days_rest=days_rest,
                 missing_usage=missing_usage_today
             )
+
+            # Fix stale USAGE_VACUUM: the stored value reflects the last game played,
+            # not today. Each OUT teammate reduces STAR_COUNT by 1, so USAGE_VACUUM
+            # (= TEAM_AVG_STARS - STAR_COUNT) increases by the same amount.
+            if team_out_count > 0:
+                old_uv = float(input_row['USAGE_VACUUM'].iloc[0]) if 'USAGE_VACUUM' in input_row.columns else 0.0
+                input_row['USAGE_VACUUM'] = old_uv + team_out_count
 
             player_predictions = {}
             features_ok = True
@@ -1505,8 +1514,45 @@ def scan_all(df_history, models, is_tomorrow=False, max_days_forward=7):
 
             print()
 
+        # ── BEST BETS — All Three Signals Agree ───────────────────────────
+        best_bet_candidates = []
+        for bet in deduped_bets:
+            is_over = bet['EDGE'] > 0
+            abs_edge = abs(bet['PCT_EDGE'])
+            aligned_l10 = bet['L10_HIT'] if is_over else (1 - bet['L10_HIT'])
+            h2h_n = bet.get('H2H_N', 0)
+            aligned_h2h = (bet['H2H_HIT'] if is_over else (1 - bet['H2H_HIT'])) if h2h_n > 0 else 0
+
+            if (abs_edge >= 15.0 and aligned_l10 >= 0.60 and h2h_n >= 5 and aligned_h2h >= 0.60
+                    and bet.get('TIER') in {'ELITE', 'STRONG', 'DECENT'}):
+                bet['_BB_SCORE'] = abs_edge * aligned_l10 * aligned_h2h
+                best_bet_candidates.append(bet)
+
+        best_bet_candidates.sort(key=lambda b: -b['_BB_SCORE'])
+
+        W = 115
+        if best_bet_candidates:
+            print(f"\n{'═' * W}")
+            print(f"   🎯 BEST BETS — {scan_date_str}   (Edge ≥15% · L10 ≥60% · H2H ≥60% with 5+ games · all same direction)")
+            print(f"{'═' * W}")
+            print(f"   {'#':>3}  {'STAT':<10} {'PLAYER':<23} {'PROJ':>6} {'LINE':>6} {'EDGE':>8} {'L5':>4} {'L10':>4} {'H2H':>8}  {'TIER'}")
+            print(f"{'─' * W}")
+            for i, bet in enumerate(best_bet_candidates, 1):
+                is_over = bet['EDGE'] > 0
+                edge_str   = f"{bet['PCT_EDGE']:+.1f}%"
+                target_str = bet['TARGET'].replace('_1H', ' 1H').replace('FPTS', 'FSCR')
+                l5_str  = f"{bet['L5_HIT']*100:.0f}%"  if is_over else f"{(1-bet['L5_HIT'])*100:.0f}%"
+                l10_str = f"{bet['L10_HIT']*100:.0f}%" if is_over else f"{(1-bet['L10_HIT'])*100:.0f}%"
+                h2h_n   = bet.get('H2H_N', 0)
+                h2h_str = f"{((bet['H2H_HIT'] if is_over else 1-bet['H2H_HIT'])*100):.0f}%({h2h_n})" if h2h_n > 0 else '--'
+                print(f"   {i:>3}  {target_str:<10} {bet['NAME'][:23]:<23} {bet['AI']:>6.1f} {bet['PP']:>6.1f} "
+                      f"{edge_str:>8} {l5_str:>4} {l10_str:>4} {h2h_str:>8}  {bet['TIER']}")
+            print(f"{'─' * W}")
+            print(f"\n   {len(best_bet_candidates)} plays where model edge, recent form, AND opponent history all point the same way.\n")
+        else:
+            print(f"\n   🎯 BEST BETS: No plays today meet all three criteria (Edge ≥15%, L10 ≥60%, H2H ≥60%/5+).\n")
+
         # ── ALL MARKETS BREAKDOWN ──────────────────────────────────────────
-        # Best plays per stat/market, all tiers, no player cap
         from collections import defaultdict
         market_groups = defaultdict(list)
         for bet in deduped_bets:
@@ -1902,20 +1948,20 @@ def scout_player(df_history, models):
         df_current = df_history[(df_history[season_col] == current_season) & (df_history['TEAM_ID'] == team_id)]
         team_players = df_current['PLAYER_ID'].unique()
         missing_usage_today = 0.0
+        team_out_count = 0
         for pid in team_players:
             p_rows = df_current[df_current['PLAYER_ID'] == pid].sort_values('GAME_DATE')
             if p_rows.empty: continue
             last_row = p_rows.iloc[-1]
             if get_player_status(last_row['PLAYER_NAME']) == 'OUT':
                 usage = last_row.get('USAGE_RATE_Season', 0)
-                if usage > 15: missing_usage_today += usage
+                if usage > 15:
+                    missing_usage_today += usage
+                    team_out_count += 1
 
         print(f"\nSCOUTING REPORT: {name} ({actual_date})")
-        print(f"Injury Impact: {missing_usage_today:.1f}% Missing Usage")
+        print(f"Injury Impact: {team_out_count} teammate(s) OUT ({missing_usage_today:.1f}% usage missing)")
 
-        # NOTE: Manual injury redistribution removed — matches scan_all behaviour.
-        # MISSING_USAGE is fed into XGBoost as a feature and the model handles the
-        # boost internally.  Adding a second manual bump caused double-counting.
         inj_adj = {}
 
         # Analyze player availability (injury return / minute restriction)
@@ -1960,6 +2006,11 @@ def scout_player(df_history, models):
             days_rest = 2
 
         input_row = prepare_features(player_data, is_home=is_home, days_rest=days_rest, missing_usage=missing_usage_today)
+
+        # Fix stale USAGE_VACUUM (same logic as scan_all)
+        if team_out_count > 0:
+            old_uv = float(input_row['USAGE_VACUUM'].iloc[0]) if 'USAGE_VACUUM' in input_row.columns else 0.0
+            input_row['USAGE_VACUUM'] = old_uv + team_out_count
 
         # Lookup FanDuel odds and PrizePicks lines for this player
         player_fd = fd_odds_by_player.get(normalize_name(name), {})
