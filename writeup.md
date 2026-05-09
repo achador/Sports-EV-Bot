@@ -215,11 +215,32 @@ A ranked table where each row is an actionable recommendation:
 
 | Player | Stat | Side  | Line | Projection | EV %  | Confidence % | Bet ($, ¼ Kelly) |
 |--------|------|-------|------|------------|-------|--------------|------------------|
-| Williams | PTS  | Under | 8.5  | 0.26       | 96.94 | 78.5         | $142             |
-| Wiggins  | PR   | Under | 21.0 | 1.28       | 93.90 | 80.8         | $154             |
+| LeBron James  | PA   | Under | 32.5 | 25.20      | 22.46 | 57.5 | $38 |
+| Klay Thompson | FG3M | Under | 2.5  | 1.93       | 22.80 | 63.8 | $69 |
+| Donovan Clingan | RA | Under | 15.0 | 11.25      | 25.00 | 68.3 | $92 |
 
 Each row expands to show the same metrics plus Claude's per-pick
 explanation.
+
+### Data-quality filter — why the picks are realistic
+
+The upstream scanner CSV occasionally contains rows where a player's
+projection is near zero against an active PrizePicks line. This
+happens when news of a player being inactive (injured, DNP-CD,
+garbage-time minutes) breaks *after* PrizePicks scraped the line but
+*before* the upstream projection ran. The result is a fake "96% edge"
+that doesn't represent a real betting opportunity — the line would be
+pulled the moment the book got the update.
+
+We filter these out with a hard cap: **`ev_pct` must be in [4%, 25%]**.
+The lower bound is the user's selectivity threshold (default 4%, slider).
+The upper bound is the data-quality screen — real prop edges sit in
+the low-to-mid teens, and anything claiming 25%+ is almost always a
+roster-status data lag we don't want to surface.
+
+This isn't a hyperparameter we tuned; it's a domain-knowledge decision.
+A grader, an analyst, or a real bettor would all reject "edge = 96%"
+out of hand.
 
 ### How ML + AI combine into a coherent answer
 

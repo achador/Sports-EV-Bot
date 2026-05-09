@@ -290,6 +290,18 @@ def run_scan(
         return df, info
 
     df = df[df["ev_pct"] >= ev_threshold]
+
+    # Sanity cap — drop picks with implausibly large edges. Real prop
+    # edges are 2-15%. An "edge" of 90%+ almost always means the
+    # upstream projection model assigned a near-zero projection because
+    # the player is inactive (injured, garbage time, DNP-CD), while
+    # PrizePicks' line was scraped before news broke. Books like PP
+    # would never publish those lines once roster status updates, so
+    # surfacing them produces obviously-bogus recommendations. We cap
+    # at 25% to keep only realistic prop opportunities.
+    MAX_REALISTIC_EV = 0.25
+    df = df[df["ev_pct"] <= MAX_REALISTIC_EV]
+
     if player_filter:
         df = df[df["player"].str.contains(player_filter, case=False, na=False)]
 
