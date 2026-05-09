@@ -143,20 +143,51 @@ def explain_pick(pick: dict[str, Any], sport: str = "NBA") -> str:
 
 
 def _fallback(pick: dict[str, Any]) -> str:
-    """Deterministic, no-API-required reasoning so the demo never breaks."""
+    """Deterministic reasoning template using the same fields the LLM gets.
+
+    Built so the demo never breaks (e.g., during API outage or missing
+    credits) — uses our confidence classifier's output and top SHAP
+    contributor to produce something that still reads as model-grounded
+    reasoning, just without the LLM's flexibility.
+    """
     proj = pick.get("projection")
     line = pick.get("line")
     side = pick.get("side", "?")
     stat = pick.get("stat", "stat")
-    ev = float(pick.get("ev_pct", 0)) * 100
+    conf_raw = pick.get("confidence")
+
     delta = None
     try:
         delta = float(proj) - float(line)
     except (TypeError, ValueError):
         pass
     delta_str = f"{delta:+.2f}" if delta is not None else "?"
+
+    conf_str = (
+        f"{float(conf_raw) * 100:.1f}%"
+        if conf_raw is not None and conf_raw == conf_raw  # NaN-safe
+        else "n/a"
+    )
+
+    bet = pick.get("bet_size")
+    bet_str = f"${int(bet)}" if bet is not None else "n/a"
+
+    # SHAP top contributor — anchor the reasoning to a real feature.
+    top_feature_phrase = ""
+    shap_top = pick.get("shap_top3")
+    if shap_top:
+        try:
+            name, contrib = shap_top[0]
+            direction = "pushing toward" if contrib > 0 else "pushing against"
+            top_feature_phrase = (
+                f" The top feature in our classifier's score is "
+                f"`{name}` ({contrib:+.2f} SHAP), {direction} this side."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     return (
-        f"Model projects **{proj}** {stat} vs. a line of **{line}** "
-        f"({delta_str}), implying a clear lean to the **{side}**. "
-        f"Net of the FanDuel-implied probability, expected value is **{ev:.2f}%**."
+        f"Upstream projection of **{proj}** {stat} vs. a line of **{line}** "
+        f"({delta_str}) leans **{side}**. Our classifier's confidence: "
+        f"**{conf_str}**; suggested ¼-Kelly stake: **{bet_str}**.{top_feature_phrase}"
     )
