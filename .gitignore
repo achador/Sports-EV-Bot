@@ -39,3 +39,12 @@ data/tennis/processed/
 
 # Tennis model binaries (regenerate with train.py)
 models/tennis/*.json
+
+# Add these lines to your existing .gitignore:
+.streamlit/secrets.toml
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
