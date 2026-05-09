@@ -23,7 +23,15 @@ except ImportError:  # pragma: no cover
     Anthropic = None  # type: ignore[assignment]
 
 
-MODEL_NAME = "claude-haiku-4-5-20251001"
+# Model fallback chain. We try the first one; on BadRequestError (e.g. the
+# account doesn't have access to a newer model), we transparently retry the
+# next one. Listed newest → oldest.
+MODEL_CHAIN = [
+    "claude-haiku-4-5",          # newest haiku, no datestamp
+    "claude-3-5-haiku-latest",   # widely available alias
+    "claude-3-5-haiku-20241022", # explicit 3.5 haiku release
+]
+MODEL_NAME = MODEL_CHAIN[0]  # legacy export for any caller still reading it
 MAX_TOKENS = 220
 SYSTEM_PROMPT = (
     "You are an analyst on a sports prop-betting desk. You are given a single "
@@ -95,30 +103,43 @@ def _format_pick(pick: dict[str, Any], sport: str) -> str:
 def explain_pick(pick: dict[str, Any], sport: str = "NBA") -> str:
     """Return a 2-3 sentence explanation for a single pick.
 
-    Falls back to a deterministic template if the API call fails so the UI
-    never breaks during the demo.
+    Tries each model in MODEL_CHAIN in order; falls back to a deterministic
+    template only if every model fails so the UI never breaks during the demo.
     """
     if not explainer_available():
         return _fallback(pick)
 
     body = _format_pick(pick, sport)
-    try:
-        msg = _client().messages.create(
-            model=MODEL_NAME,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": body}],
-        )
-        # The SDK returns a list of content blocks; we want the text.
-        parts = [
-            block.text  # type: ignore[attr-defined]
-            for block in msg.content
-            if getattr(block, "type", None) == "text"
-        ]
-        text = "\n".join(parts).strip()
-        return text or _fallback(pick)
-    except Exception as exc:  # noqa: BLE001
-        return f"_Claude call failed ({exc.__class__.__name__}). Fallback:_\n\n{_fallback(pick)}"
+    last_err: Exception | None = None
+    last_model: str = ""
+    for model_id in MODEL_CHAIN:
+        try:
+            msg = _client().messages.create(
+                model=model_id,
+                max_tokens=MAX_TOKENS,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": body}],
+            )
+            parts = [
+                block.text  # type: ignore[attr-defined]
+                for block in msg.content
+                if getattr(block, "type", None) == "text"
+            ]
+            text = "\n".join(parts).strip()
+            return text or _fallback(pick)
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            last_model = model_id
+            # Try the next model in the chain
+            continue
+
+    # Every model failed — surface the actual error so debugging is possible.
+    err_msg = str(last_err) if last_err else "no error captured"
+    err_class = last_err.__class__.__name__ if last_err else "Unknown"
+    return (
+        f"_Claude call failed on `{last_model}` "
+        f"({err_class}: {err_msg[:200]}). Fallback:_\n\n{_fallback(pick)}"
+    )
 
 
 def _fallback(pick: dict[str, Any]) -> str:
