@@ -9,7 +9,12 @@ __pycache__/
 # Data files (large, not tracked)
 data/nba/raw/
 data/nba/processed/
-data/nba/projections/
+# Ignore everything inside data/nba/projections/ by pattern, then
+# selectively un-ignore the specific demo fixtures used by the deployed
+# Streamlit app's fallback path. Future fresh-scan CSVs remain ignored.
+data/nba/projections/*
+!data/nba/projections/scan_2026-05-09.csv
+!data/nba/projections/scan_2026-05-10.csv
 
 # Model binaries (regenerate with train.py)
 models/nba/*.json

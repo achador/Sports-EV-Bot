@@ -1,0 +1,36 @@
+{
+  "trained_at": "2026-05-09T17:39:00",
+  "seasons": [
+    "2023-24",
+    "2024-25"
+  ],
+  "target_stat": "PTS",
+  "features": [
+    "edge_pct",
+    "line_magnitude",
+    "days_rest",
+    "is_home",
+    "min_l10"
+  ],
+  "winner": "xgboost_classifier",
+  "train_rows": 36060,
+  "test_rows": 9016,
+  "test_metrics": {
+    "logistic_regression": {
+      "accuracy": 0.5541259982253771,
+      "auc": 0.5171980951168968,
+      "log_loss": 0.6867991271889905,
+      "brier": 0.24683334429603382,
+      "n": 9016,
+      "base_rate": 0.5591171251109139
+    },
+    "xgboost_classifier": {
+      "accuracy": 0.5634427684117125,
+      "auc": 0.5688295099679483,
+      "log_loss": 0.6807590356146719,
+      "brier": 0.24382169544696808,
+      "n": 9016,
+      "base_rate": 0.5591171251109139
+    }
+  }
+}

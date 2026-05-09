@@ -28,11 +28,13 @@ MAX_TOKENS = 220
 SYSTEM_PROMPT = (
     "You are an analyst on a sports prop-betting desk. You are given a single "
     "model-recommended pick: the player, the stat, the bookmaker line, the "
-    "model's projection, the EV%, and a handful of supporting features. "
-    "Write a 2-3 sentence explanation of why this pick has positive expected "
-    "value. Be specific and quantitative — cite the projection vs. the line, "
-    "and reference the most relevant supporting feature(s). Do not hedge with "
-    "generic disclaimers. Do not exceed 60 words."
+    "upstream projection, our meta-model's confidence, the suggested Kelly "
+    "stake, and the top-3 features driving our confidence (with signed SHAP "
+    "contributions). Write a 2-3 sentence explanation of why this pick has "
+    "positive expected value. Be specific and quantitative — cite the "
+    "projection vs. the line, the confidence number, and the most-relevant "
+    "SHAP contributor. Do not hedge with generic disclaimers. Do not exceed "
+    "70 words."
 )
 
 
@@ -61,39 +63,32 @@ def _client() -> Any:
 
 def _format_pick(pick: dict[str, Any], sport: str) -> str:
     """Pack the pick dict into a tight, model-friendly prompt body."""
+    conf = pick.get("confidence")
+    conf_str = f"{round(float(conf) * 100, 1)}%" if conf is not None else "n/a"
+    bet_amt = pick.get("bet_size")
+    bet_str = f"${int(bet_amt)}" if bet_amt is not None else "n/a"
+
     lines = [
         f"Sport: {sport}",
         f"Player: {pick.get('player', 'unknown')}",
         f"Stat / market: {pick.get('stat', 'unknown')}",
         f"Recommendation: {pick.get('side', '?')} {pick.get('line', '?')}",
-        f"Model projection: {pick.get('projection', '?')}",
-        f"EV: {round(float(pick.get('ev_pct', 0)) * 100, 2)}%",
-        f"FanDuel implied probability: "
-        f"{round(float(pick.get('fd_implied_pct', 0)) * 100, 1)}%",
+        f"Upstream projection: {pick.get('projection', '?')}",
+        f"Heuristic EV (proj vs. line): "
+        f"{round(float(pick.get('ev_pct', 0)) * 100, 2)}%",
+        f"Our meta-model confidence (P[bet hits]): {conf_str}",
+        f"Suggested fractional-Kelly stake: {bet_str}",
     ]
-    # Optional supporting features. Only include those that are present and
-    # non-null to keep the prompt focused.
-    extras_keys = [
-        "opponent",
-        "is_home",
-        "rest_days",
-        "season_avg",
-        "last5_avg",
-        "last10_avg",
-        "minutes_proj",
-        "opp_allowed_to_pos",
-        "usage_rate",
-        "pace",
-        "surface",
-        "rank",
-        "opp_rank",
-        "h2h_winrate",
-    ]
-    extras = {k: pick[k] for k in extras_keys if k in pick and pick[k] is not None}
-    if extras:
-        lines.append("Supporting features:")
-        for k, v in extras.items():
-            lines.append(f"  - {k}: {v}")
+
+    shap_top = pick.get("shap_top3")
+    if shap_top:
+        lines.append("Top-3 features driving confidence (signed SHAP contribution):")
+        try:
+            for name, contrib in shap_top:
+                lines.append(f"  - {name}: {contrib:+.3f}")
+        except Exception:  # noqa: BLE001 — defensive against shape changes
+            pass
+
     return "\n".join(lines)
 
 
